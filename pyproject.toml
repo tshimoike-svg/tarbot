@@ -1,0 +1,49 @@
+[project]
+name = "trading-bot"
+version = "0.0.0"
+description = "kabuステーションAPIを使った日本株信用取引デイトレードボット（速度で戦わない頻回トレード／Phase 0: エッジ検証）"
+readme = "README.md"
+requires-python = ">=3.11"
+
+# --- base 依存：Phase 0（costs.py / cost_model.py / indicators / J-Quants取得）に必要な確実に入るものだけ ---
+dependencies = [
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "requests>=2.32",      # J-Quants REST 取得用
+    "python-dotenv>=1.0",  # .env からの認証情報読み込み
+]
+
+[project.optional-dependencies]
+# バックテスト用。vectorbt は numba/numpy を強くピン留めするため base から分離。
+# 導入時に numpy 等とのバージョン整合を別途解決すること。
+backtest = [
+    "vectorbt>=0.26",
+]
+# ダッシュボード（Phase 1〜）
+dashboard = [
+    "streamlit>=1.40",
+    "plotly>=5.24",
+]
+
+[dependency-groups]
+# 開発ツール（uv native dev group）。`uv sync` で既定インストールされる。
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[tool.uv]
+# uv が管理する Python を使う
+python-preference = "managed"
+# まだ配布パッケージではないのでプロジェクト自体はビルドしない（アプリ用途）
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]  # リポジトリルートを import パスに追加（config/ backtest/ 等）

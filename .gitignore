@@ -1,0 +1,73 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ===== Virtual envs =====
+.venv/
+venv/
+env/
+ENV/
+
+# ===== Package managers =====
+# uv
+.uv/
+# poetry (lockfile は基本コミットするので除外しない)
+
+# ===== Testing / coverage =====
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# ===== Jupyter =====
+.ipynb_checkpoints/
+
+# ===== Secrets / 認証情報（最重要・絶対にコミットしない） =====
+.env
+.env.*
+!.env.example
+config/secrets.py
+config/credentials.json
+*.token
+*_api_key*
+*apikey*
+# kabu / J-Quants の認証・トークン
+*kabu*secret*
+*jquants*token*
+
+# ===== データ・DB（再取得可能/大容量なのでコミットしない） =====
+data/raw/
+data/cache/
+data/db/
+*.sqlite
+*.sqlite3
+*.db
+*.parquet
+*.feather
+*.csv
+!config/**/*.csv
+!tests/**/*.csv
+
+# ===== バックテスト成果物・ログ =====
+backtest/results/
+logs/
+*.log
+
+# ===== Claude Code（ローカル専用設定） =====
+.claude/settings.local.json
+
+# ===== OS / エディタ =====
+.DS_Store
+.idea/
+.vscode/
+*.swp
