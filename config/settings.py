@@ -15,7 +15,13 @@ import os
 from dataclasses import dataclass
 from datetime import time
 
-__all__ = ["DRY_RUN", "MeanReversionParams", "DEFAULT_MEAN_REVERSION"]
+__all__ = [
+    "DRY_RUN",
+    "MeanReversionParams",
+    "DEFAULT_MEAN_REVERSION",
+    "RiskParams",
+    "DEFAULT_RISK",
+]
 
 
 def _env_dry_run_default() -> bool:
@@ -81,3 +87,41 @@ class MeanReversionParams:
 
 # 既定パラメータ（バックテストの初期仮説。最適化結果で上書きする）。
 DEFAULT_MEAN_REVERSION = MeanReversionParams()
+
+
+@dataclass(frozen=True)
+class RiskParams:
+    """リスク管理ルール（v2 §6 の再設計テーブル）。
+
+    全発注は `strategy/risk_manager.py` の関門でこれらをチェックされる（絶対原則2）。
+    比率はすべて口座資金に対する割合。
+
+    Attributes:
+        max_risk_per_trade: 1トレードで失ってよい最大額の比率（既定 0.5%）。
+            固定%損切りではなく「1トレードで失う資金額」を固定する思想。
+        max_symbol_ratio: 1銘柄あたり最大投資比率（既定 20%）。集中リスク制限。
+        max_daily_loss: 1日の最大損失（サーキットブレーカー、既定 3%）。
+            到達したら当日の新規建てを全停止する。
+        max_trades_per_day: 1日の最大トレード回数（既定 30）。過剰トレード・暴走防止。
+        max_positions: 同時保有最大銘柄数（既定 5）。
+    """
+
+    max_risk_per_trade: float = 0.005
+    max_symbol_ratio: float = 0.20
+    max_daily_loss: float = 0.03
+    max_trades_per_day: int = 30
+    max_positions: int = 5
+
+    def __post_init__(self) -> None:
+        for name in ("max_risk_per_trade", "max_symbol_ratio", "max_daily_loss"):
+            value = getattr(self, name)
+            if not 0.0 < value <= 1.0:
+                raise ValueError(f"{name} は (0, 1] の比率: {value}")
+        if self.max_trades_per_day < 1:
+            raise ValueError("max_trades_per_day は 1 以上")
+        if self.max_positions < 1:
+            raise ValueError("max_positions は 1 以上")
+
+
+# 既定のリスク設定（初期案。実運用前に必ず自分で検証・調整すること）。
+DEFAULT_RISK = RiskParams()
