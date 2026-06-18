@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv sync*)",
+      "Bash(uv add*)",
+      "Bash(uv run *)",
+      "Bash(uv lock*)",
+      "Bash(uv version*)",
+      "Bash(uv --version)",
+      "Bash(uv python *)",
+      "Bash(pytest*)",
+      "Bash(ruff*)",
+      "Bash(mypy*)",
+      "Bash(git status*)",
+      "Bash(git log*)",
+      "Bash(git diff*)",
+      "Bash(git show*)",
+      "Bash(git branch*)",
+      "Bash(git add *)",
+      "Bash(git rm *)",
+      "Bash(git commit *)",
+      "Bash(git check-ignore *)",
+      "Bash(ls*)",
+      "Bash(cat *)",
+      "Bash(head*)",
+      "Bash(tail*)",
+      "Bash(grep*)",
+      "Bash(wc*)",
+      "Bash(sort*)",
+      "Bash(uniq*)",
+      "Bash(find*)",
+      "Bash(mkdir*)",
+      "Bash(echo*)",
+      "Bash(touch*)",
+      "Bash(true)",
+      "Edit",
+      "Write",
+      "Read"
+    ]
+  }
+}
