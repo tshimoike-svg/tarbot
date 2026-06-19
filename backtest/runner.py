@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import pickle
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 
@@ -43,6 +45,7 @@ __all__ = [
     "compare_strategies",
     "format_result",
     "jquants_loader",
+    "disk_cached_loader",
     "main",
 ]
 
@@ -182,16 +185,17 @@ def format_result(result: BacktestResult) -> str:
 
 
 def jquants_loader(
-    *, from_: str, to: str, base_url: str | None = None
+    *, from_: str, to: str, base_url: str | None = None, min_interval: float = 1.0
 ) -> LoadBars:
     """J-Quants から日足を取得する load_bars を返す（.env の認証を使用）。
 
     実データ取得用。認証情報が無ければ最初の呼び出しで JQuantsAuthError。
+    レート制限を受けた場合は min_interval=2.0 以上に上げる（または --cache-dir で節約）。
     """
     from data.fetcher import JQuantsClient  # 遅延 import（テストは認証不要のまま）
 
     # レート制限対策：リクエスト間隔を空け、リトライを厚めに
-    kwargs: dict[str, object] = {"min_interval": 1.0, "max_retries": 5, "retry_backoff": 2.0}
+    kwargs: dict[str, object] = {"min_interval": min_interval, "max_retries": 8, "retry_backoff": 3.0}
     client = (
         JQuantsClient(base_url=base_url, **kwargs)  # type: ignore[arg-type]
         if base_url
@@ -200,6 +204,37 @@ def jquants_loader(
 
     def _load(symbol: str) -> pd.DataFrame:
         return client.get_daily_quotes(code=symbol, from_=from_, to=to)
+
+    return _load
+
+
+def disk_cached_loader(
+    base_loader: LoadBars,
+    *,
+    from_: str,
+    to: str,
+    cache_dir: str | Path = "data/db/bars_cache",
+) -> LoadBars:
+    """ディスクキャッシュ（pickle）付きローダー。
+
+    同一 (symbol, from_, to_) の日足は1度だけ取得してローカルに保存する。
+    繰り返しバックテストで J-Quants API 呼び出しを減らし、レート制限を回避する。
+    キャッシュキーに from_/to を含むので期間変更時は自動的に再取得する。
+    """
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+    key = f"{from_}_{to}".replace("-", "")
+
+    def _load(symbol: str) -> pd.DataFrame:
+        pkl = cache_path / f"{symbol}_{key}.pkl"
+        if pkl.exists():
+            logger.debug("キャッシュから読み込み: %s", symbol)
+            with pkl.open("rb") as f:
+                return pickle.load(f)  # noqa: S301 - ローカル自前生成ファイルのみ
+        df = base_loader(symbol)
+        with pkl.open("wb") as f:
+            pickle.dump(df, f)
+        return df
 
     return _load
 
@@ -223,6 +258,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--tier", choices=["large", "mid", "small"], default="mid", help="コスト想定ティア")
     parser.add_argument("--n-splits", type=int, default=4)
     parser.add_argument("--min-trades", type=int, default=300)
+    parser.add_argument("--cache-dir", default="data/db/bars_cache",
+                        help="日足キャッシュdir（既定: data/db/bars_cache）。--no-cache で無効化")
+    parser.add_argument("--no-cache", action="store_true", help="キャッシュを使わず毎回取得")
+    parser.add_argument("--min-interval", type=float, default=1.0,
+                        help="APIリクエスト間隔(秒)（既定 1.0。レート制限を受けたら 2.0 以上に）")
     args = parser.parse_args(argv)
 
     if args.symbols:
@@ -236,7 +276,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     cost_model = CostModel(get_cost_params(tier))
 
     try:
-        load_bars = jquants_loader(from_=args.from_, to=args.to)
+        raw_loader = jquants_loader(
+            from_=args.from_, to=args.to, min_interval=args.min_interval
+        )
+        load_bars = raw_loader if args.no_cache else disk_cached_loader(
+            raw_loader, from_=args.from_, to=args.to, cache_dir=args.cache_dir
+        )
         if args.compare:
             results = compare_strategies(
                 symbols, load_bars, cost_model=cost_model,
