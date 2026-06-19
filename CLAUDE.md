@@ -1,17 +1,19 @@
 # CLAUDE.md — Trading Bot Project
 
 > Claude Code が毎セッション参照する常時コンテキスト。
-> 設計の全体像は `docs/trading_bot_design_v2.md`（v2設計書）を参照。本ファイルはその要約＋実装規約。
+> 設計の全体像は `docs/trading_bot_design_v3.md`（v3設計書・現行）を参照。本ファイルはその要約＋実装規約。
+> v3 で時間軸を「日中（分足）」から「数日〜2週間のスイング（日足）」へ転換した。
 
 ---
 
 ## プロジェクト概要
 
-kabuステーションAPI を使った日本株（信用取引）デイトレードボット。
-**速度では戦わない。** 容量制約ニッチ（機関が無視する中小型株の数秒〜数分の歪み）での、
-規律ある頻回トレードにより、**コスト控除後でプラスの期待値**を積み上げることを狙う。
+kabuステーションAPI を使った日本株（信用取引）**スイングトレード**ボット。
+**速度では戦わない。** 容量制約ニッチ（機関が無視する中小型株の歪み）を、
+**数日〜最大2週間保有**の規律あるトレードで取り、**コスト控除後でプラスの期待値**を狙う。
+日足で完結するため、分足・ライブ常時接続は不要（J-Quants 日足で過去検証できる）。
 
-現状フェーズ：**Phase 0**（口座開通待ち。J-Quants過去データでエッジの有無を白黒つける段階）
+現状フェーズ：**Phase 0**（J-Quants日足で日足スイング戦略のエッジを白黒つける。口座不要）
 
 ---
 
@@ -41,8 +43,8 @@ uv run pytest                                 # 全テスト
 uv run pytest tests/test_risk_manager.py -v   # リスク管理だけ
 uv run pytest tests/test_cost_model.py -v     # コストモデルだけ
 
-# バックテスト（Phase 0 の主役）
-uv run python -m backtest.runner --strategy mean_reversion --symbols config/symbols.py
+# バックテスト（Phase 0 の主役。strategy は swing_reversion / swing_momentum）
+uv run python -m backtest.runner --strategy swing_reversion --symbols config/symbols.py
 
 # ダッシュボード（Phase 1〜）
 uv run streamlit run dashboard/app.py
@@ -56,7 +58,7 @@ uv run ruff check . && uv run mypy .
 ```
 
 > 依存は `pyproject.toml` で管理し、`uv.lock` で再現性を固定する（両方コミットする）。
-> 指標（VWAP/ATR/BB）は numpy 2.x で壊れる `pandas-ta` を避け、`strategy/indicators.py` に自前実装する方針。
+> 指標（移動平均/ATR/zスコア等）は numpy 2.x で壊れる `pandas-ta` を避け、`strategy/indicators.py` に自前実装する方針。
 
 ---
 
@@ -68,7 +70,7 @@ uv run ruff check . && uv run mypy .
   - 監視銘柄・流動性フィルタ → `config/symbols.py`
   - コスト想定（スプレッド/滑り/信用コスト）→ `config/costs.py`
 - 金額・株価は浮動小数点の丸め誤差に注意（必要なら `Decimal`）。
-- 時刻は JST 固定、取引時間（前場・後場・寄り・引け）の境界を明示的に扱う。
+- 時刻は JST 固定。日足の日付境界・約定は翌営業日の寄りを基準にする。
 - ログは構造化して残す（戦略名・シグナル・約定/不約定・滑り・コスト）。あとで期待値検証に使う。
 - 外部API（kabu / J-Quants）呼び出しはリトライ・タイムアウト・レート制限を実装する。
 
@@ -78,20 +80,25 @@ uv run ruff check . && uv run mypy .
 
 ```
 config/      設定・パラメータ・コスト想定
-data/        データ取得（J-Quants過去データ / kabu WebSocket）・DB保存
+data/        データ取得（J-Quants日足 / kabu WebSocket）・DB保存
 strategy/    指標・シグナル生成・リスク管理
-  mean_reversion.py  ← 【主力・トラックA】日中平均回帰（バックテスト可能）
-  event_reaction.py  ← 【トラックB】TDnetイベント反応（ドライラン専用）
+  trade.py           ← 共有 Trade 型
+  indicators.py      ← 移動平均/ATR/zスコア等（自前実装）
+  swing.py           ← 日足スイング共通エンジン（保有・出口の状態機械）
+  swing_reversion.py ← 【トラックA】日足平均回帰（押し目買い/戻り売り）
+  swing_momentum.py  ← 【トラックA】日足ブレイクアウト（モメンタム）
+  position_sizer.py  ← リスク基準のサイジング
   risk_manager.py    ← 全発注が通る関門
-execution/   執行（指値中心）・約定率/滑り計測・ドライラン
-backtest/    バックテスト実行・コストモデル・バイアスチェック付き評価
-notification/ LINE Messaging API・メール通知
-dashboard/   Streamlit + Plotly
+  event_reaction.py  ← 【トラックB・未】TDnetイベント反応（ドライラン専用）
+execution/   fill_monitor.py（約定率/滑り実測）・dry_run.py（イベント駆動）・order_engine.py(未)
+backtest/    cost_model.py・evaluator.py・runner.py(未)
+notification/ LINE Messaging API・メール通知（未）
+dashboard/   Streamlit + Plotly（未）
 tests/       各モジュールのテスト
 ```
 
 検証は2トラックに分離する：
-- **トラックA（バックテスト可能）**：平均回帰・寄り後パターン・相対強弱 → OHLCVで過去検証
+- **トラックA（バックテスト可能）**：日足スイング平均回帰・モメンタム → 日足OHLCVで過去検証
 - **トラックB（バックテスト不能）**：イベント反応・L1フィルタ → ドライランでのみ検証
 
 ---
@@ -102,29 +109,30 @@ tests/       各モジュールのテスト
 - **kabuステーション（Windows GUIアプリ）が起動・ログイン中でないとAPIは使えない**。本番VPSも Windows 必須。
 - 手数料無料は **SOR注文選択が条件**（2026年5月18日以降）。APIからSORが指定できるか・選ばないと手数料が出るかは要確認事項（未確定）。
 - **Professionalプランはほぼ毎月の取引で維持**。切れるとAPIが停止する。月次で適用状況を監視する処理を入れる。
-- 信用の金利・貸株料は手数料無料後も残る。当日返済前提でも持ち越し時は効く。
+- 信用の金利・貸株料は手数料無料後も残る。**スイングは数日〜2週間持ち越すので必ず効く**（cost_model が holding_days で計上）。オーバーナイトのギャップリスクにも注意。
 - 通知は **LINE Messaging API**（LINE Notify は終了済み）またはメール。
 
 ---
 
 ## 現在のタスク：Phase 0（最優先・口座不要）
 
-**ゴール**：J-Quants の過去データで日中平均回帰戦略を1つ実装し、
-**コスト控除後・ウォークフォワードで明確な正の期待値が出るか**を検証する。
-ここを越えられないなら後続（ML・イベント・実取引）は全て無意味。最優先で白黒つける。
+**ゴール**：J-Quants の**日足**で日足スイング戦略（平均回帰・モメンタム）を検証し、
+**コスト控除後・ウォークフォワードで明確な正の期待値が出るか**を白黒つける。
+ここを越えられないなら後続（ML・イベント・実取引）は全て無意味。最優先で見切る。
 
-### 着手順序
-1. `config/costs.py` と `backtest/cost_model.py` を**先に**作る
-   - 往復コスト ＝ 実効スプレッド ＋ 滑り ＋ 信用コスト（持ち越し時）を保守的に見積もる
-   - スプレッドは銘柄ごとに異なる前提でモデル化（中小型は広い）
-2. `data/fetcher.py` で J-Quants の OHLCV（分足）と**上場廃止銘柄情報**を取得
-3. `strategy/indicators.py` に VWAP・ATR・ボリンジャーバンドを実装
-4. `strategy/mean_reversion.py` を実装（初期仮説）
-   - エントリー：VWAP（または移動平均）からの行き過ぎ（例：-Nσ）で逆張りの指値
-   - イグジット：VWAP回帰で利確 ／ ATRベースの損切り（例：1.5×ATR）
-   - 当日中に強制クローズ
-   - パラメータは `config/settings.py` に置き、ハードコードしない
-5. `backtest/runner.py` + `backtest/evaluator.py` で検証
+### 進捗（実装済み）
+- `config/costs.py` / `backtest/cost_model.py`（往復コスト＝スプレッド＋滑り＋**保有日数ぶんの金利**）
+- `data/fetcher.py`（J-Quants 日足・調整後価格・廃止銘柄込みユニバース）
+- `strategy/indicators.py`（移動平均/ATR/zスコア等・自前・因果性テスト済み）
+- `strategy/swing_reversion.py` / `swing_momentum.py` ＋ 共通エンジン `swing.py`
+- `strategy/risk_manager.py`（関門）/ `position_sizer.py`（リスク基準サイジング）
+- `backtest/evaluator.py`（コスト控除後・ウォークフォワード・Phase0ゲート判定）
+- `execution/fill_monitor.py`・`dry_run.py`（イベント駆動・発注なし）/ `data/storage.py`
+
+### 残作業
+1. `backtest/runner.py`：複数銘柄・期間を束ね、両戦略を回して比較する司令塔
+2. 実データ投入：`.env` に J-Quants 認証を置き、無料日足で**本物のバックテスト**を実行
+3. 両戦略のコスト控除後の期待値・ウォークフォワード安定性を比較して go/no-go
 
 ### evaluator.py の必須チェック（§7のバイアス対策）
 - [ ] ルックアヘッド・バイアスがないか（シグナル時点で未来値を見ていない）
@@ -158,6 +166,6 @@ tests/       各モジュールのテスト
 
 ## 重要な前提（開発者の心構え）
 
-- 大半の個人アルゴ・デイトレードはコストに負ける。本プロジェクトは「エッジがあれば抽出し、なければ安く早く見切る」ためのもの。利益は保証されない。
-- 頻回トレードの最大の敵は**スプレッドと滑り**。期待値計算でここを甘く見ると本番で必ず負ける。
+- 大半の個人アルゴはコストとギャップに負ける。本プロジェクトは「エッジがあれば抽出し、なければ安く早く見切る」ためのもの。利益は保証されない。
+- スイングの敵は**持ち越し金利＋オーバーナイトギャップ**（日中の最大の敵だったスプレッド・滑りは相対的に軽くなるが、依然コストとして必ず計上する）。期待値計算でここを甘く見ると本番で必ず負ける。
 - バックテストの良成績は楽観バイアスの塊になりやすい。常に保守的に見積もる。

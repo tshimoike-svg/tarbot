@@ -1,11 +1,12 @@
 # Trading Bot
 
-kabuステーションAPI を使った日本株（信用取引）デイトレードボット。
-**速度では戦わない。** 容量制約ニッチでの規律ある頻回トレードで、コスト控除後にプラスの期待値を狙う。
+kabuステーションAPI を使った日本株（信用取引）**スイングトレード**ボット。
+**速度では戦わない。** 容量制約ニッチを数日〜最大2週間保有で取り、コスト控除後にプラスの期待値を狙う。
+日足で完結するため分足・ライブ常時接続は不要。
 
-- 設計方針：[docs/trading_bot_design_v2.md](docs/trading_bot_design_v2.md)
+- 設計方針：[docs/trading_bot_design_v3.md](docs/trading_bot_design_v3.md)（現行。v3で日足スイングへ転換）
 - 実装規約・常時コンテキスト：[CLAUDE.md](CLAUDE.md)
-- 現在フェーズ：**Phase 0**（J-Quants 過去データで日中平均回帰戦略のエッジを検証。口座開通待ち）
+- 現在フェーズ：**Phase 0**（J-Quants 日足で日足スイング戦略のエッジを検証。口座不要）
 
 ## セットアップ
 
@@ -21,8 +22,8 @@ uv sync
 # テスト
 uv run pytest
 
-# バックテスト（Phase 0）
-uv run python -m backtest.runner --strategy mean_reversion --symbols config/symbols.py
+# バックテスト（Phase 0。strategy は swing_reversion / swing_momentum）
+uv run python -m backtest.runner --strategy swing_reversion --symbols config/symbols.py
 ```
 
 > `vectorbt`（backtest）・`streamlit`/`plotly`（dashboard）は optional グループ。
