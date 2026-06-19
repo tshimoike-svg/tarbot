@@ -30,6 +30,25 @@ uv run python -m backtest.runner --strategy swing_reversion --symbols config/sym
 > numpy 等とのバージョン整合に注意が必要なため base から分離している。導入は
 > `uv sync --extra backtest` / `uv sync --extra dashboard`。
 
+## Phase 0 バックテスト（実データ）
+
+無料の J-Quants 日足で、日足スイング2戦略のエッジを**コスト控除後**で検証できる。
+
+```bash
+# 1) J-Quants に無料登録（https://jpx-jquants.com/）。分足は不要・日足は無料プランで可
+# 2) 認証情報を .env に置く（.env は git 管理外）
+cp .env.example .env        # JQUANTS_MAILADDRESS / JQUANTS_PASSWORD を記入
+
+# 3) 実行（両戦略を比較）
+uv run python -m backtest.runner --compare --from 2024-06-01 --to 2026-06-01
+# 単一戦略・銘柄指定も可
+uv run python -m backtest.runner --strategy swing_reversion --symbols 7203,6758
+```
+
+`--symbols` 省略時は `config/symbols.py` の暫定ユニバースを使う（実運用前に流動性で絞った
+銘柄群へ差し替えること）。出力はトレード数・**コスト控除後の期待値**（持ち越し金利込み）・
+勝率/PF・最大DD・ウォークフォワード・Phase0 ゲート判定。
+
 ## 安全原則（詳細は CLAUDE.md）
 
 - `config/settings.py` の `DRY_RUN` 既定は `True`。本番発注の不可逆操作は人間が実行する。
