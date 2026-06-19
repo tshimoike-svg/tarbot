@@ -23,7 +23,7 @@ from backtest.evaluator import (
     walk_forward,
 )
 from config.costs import CostParams
-from strategy.mean_reversion import Side, Trade
+from strategy.trade import Side, Trade
 
 
 def _trade(
@@ -33,7 +33,7 @@ def _trade(
     *,
     day: str = "2026-01-05",
     exit_day: str | None = None,
-    reason: str = "take_profit",
+    reason: str = "target",
 ) -> Trade:
     return Trade(
         side=side,
@@ -97,7 +97,7 @@ def test_expectancy_winrate_aggregate() -> None:
     assert res.avg_loss == pytest.approx(-0.01)
     assert res.expectancy == pytest.approx((0.02 - 0.01) / 2)
     assert res.profit_factor == pytest.approx(0.02 / 0.01)
-    assert res.by_exit_reason == {"take_profit": 2}
+    assert res.by_exit_reason == {"target": 2}
 
 
 def test_empty_trades() -> None:

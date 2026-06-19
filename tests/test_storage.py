@@ -7,7 +7,7 @@ import pytest
 
 from data.storage import Storage
 from execution.fill_monitor import FillMonitor, OrderIntent
-from strategy.mean_reversion import Trade
+from strategy.trade import Trade
 
 
 @pytest.fixture
@@ -58,7 +58,7 @@ def test_insert_and_get_trade(db: Storage) -> None:
         entry_price=1000.0,
         exit_time=pd.Timestamp("2026-01-05 10:00"),
         exit_price=1010.0,
-        exit_reason="take_profit",
+        exit_reason="target",
     )
     db.insert_trade("1301", tr, gross_return=0.01, cost=0.004, net_return=0.006)
     out = db.get_trades()

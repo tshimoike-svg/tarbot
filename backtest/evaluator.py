@@ -1,7 +1,7 @@
 """バックテスト評価（Phase 0 の合否判定）。
 
 docs/trading_bot_design_v2.md §7 / CLAUDE.md「現在のタスク」に対応。
-`strategy.mean_reversion.generate_trades` が出す**グロス（コスト控除前）**のトレード列に、
+戦略（swing_reversion / swing_momentum）が出す**グロス（コスト控除前）**のトレード列に、
 `backtest.cost_model.CostModel` の往復コストを差し引いて、**コスト控除後の期待値**で評価する。
 
 絶対原則3「バックテスト評価は必ずコスト控除後で行う」を構造的に強制するため、
@@ -30,7 +30,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from backtest.cost_model import CostModel
-from strategy.mean_reversion import Side, Trade
+from strategy.trade import Side, Trade
 
 __all__ = [
     "TradeResult",

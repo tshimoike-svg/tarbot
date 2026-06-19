@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import time
 
 __all__ = [
     "DRY_RUN",
-    "MeanReversionParams",
-    "DEFAULT_MEAN_REVERSION",
+    "SwingReversionParams",
+    "DEFAULT_SWING_REVERSION",
+    "SwingMomentumParams",
+    "DEFAULT_SWING_MOMENTUM",
     "RiskParams",
     "DEFAULT_RISK",
 ]
@@ -41,52 +42,86 @@ DRY_RUN: bool = _env_dry_run_default()
 
 
 @dataclass(frozen=True)
-class MeanReversionParams:
-    """日中平均回帰戦略のパラメータ（トラックA・主力）。
+class SwingReversionParams:
+    """日足スイング平均回帰（押し目買い／戻り売り）のパラメータ。
 
-    エントリー：VWAP からの乖離 z スコアが ±entry_z を超えたら逆張りの指値。
-      - z <= -entry_z かつ allow_long → ロング（行き過ぎ下落の反発を狙う）
-      - z >= +entry_z かつ allow_short → ショート（行き過ぎ上昇の反落を狙う）
-    イグジット：
-      - 利確：価格が VWAP に回帰したら（VWAP タッチ）
-      - 損切り：エントリー時 ATR × atr_stop_mult を逆行したら
-      - 強制：force_close 時刻以降は新規建てせず、既存はクローズ（当日手仕舞い）
+    エントリー：終値の lookback 日 z スコアが ±entry_z を超えたら逆張り
+      （z<=-entry_z かつ allow_long でロング、z>=+entry_z かつ allow_short でショート）。
+    イグジット：移動平均（lookback）への回帰で利確／ATR×倍率で損切り／
+      max_holding_days 到達でタイムストップ。
 
     Attributes:
-        zscore_length: (close − VWAP) のローリング z スコア期間。
-        entry_z: エントリー閾値（σ）。大きいほど“行き過ぎ”を厳しく要求＝回数減・質向上。
-        atr_length: ATR 期間（損切り幅の基礎）。
-        atr_stop_mult: 損切り幅 = atr_stop_mult × ATR。固定%でなくボラ適応にする（v2 §6）。
-        allow_long: ロング側エントリーを許可。
-        allow_short: ショート側（信用売り）エントリーを許可。
-        force_close: この時刻（JST）以降は新規建てせず手仕舞い。大引け前を想定。
-        use_typical_price_for_vwap: VWAP の価格に典型価格(H+L+C)/3 を使う。False なら終値。
+        lookback: 移動平均・z スコアの期間（日）。
+        entry_z: エントリー閾値（σ）。
+        atr_length: ATR 期間（日）。
+        atr_stop_mult: 損切り幅 = atr_stop_mult × ATR（オーバーナイト前提で日中より広め）。
+        max_holding_days: 最大保有日数（タイムストップ）。
+        allow_long / allow_short: 売買方向の許可。
     """
 
-    zscore_length: int = 20
+    lookback: int = 20
     entry_z: float = 2.0
     atr_length: int = 14
-    atr_stop_mult: float = 1.5
+    atr_stop_mult: float = 2.0
+    max_holding_days: int = 10
     allow_long: bool = True
     allow_short: bool = True
-    force_close: time = time(14, 55)
-    use_typical_price_for_vwap: bool = True
 
     def __post_init__(self) -> None:
-        if self.zscore_length < 2:
-            raise ValueError("zscore_length は 2 以上")
+        if self.lookback < 2:
+            raise ValueError("lookback は 2 以上")
         if self.entry_z <= 0:
             raise ValueError("entry_z は正")
         if self.atr_length < 1:
             raise ValueError("atr_length は 1 以上")
         if self.atr_stop_mult <= 0:
             raise ValueError("atr_stop_mult は正")
+        if self.max_holding_days < 1:
+            raise ValueError("max_holding_days は 1 以上")
         if not (self.allow_long or self.allow_short):
             raise ValueError("allow_long / allow_short の少なくとも一方は True")
 
 
-# 既定パラメータ（バックテストの初期仮説。最適化結果で上書きする）。
-DEFAULT_MEAN_REVERSION = MeanReversionParams()
+DEFAULT_SWING_REVERSION = SwingReversionParams()
+
+
+@dataclass(frozen=True)
+class SwingMomentumParams:
+    """日足スイング・モメンタム（ブレイクアウト）のパラメータ。
+
+    エントリー：終値が直近 breakout_lookback 日の高値を上抜けでロング／安値を
+      下抜けでショート（前日までの窓の極値と比較＝未来非参照）。
+    イグジット：固定目標は置かず、ATR×倍率の損切り／max_holding_days のタイムストップ。
+
+    Attributes:
+        breakout_lookback: ブレイク判定の窓（日）。
+        atr_length: ATR 期間（日）。
+        atr_stop_mult: 損切り幅 = atr_stop_mult × ATR。
+        max_holding_days: 最大保有日数（タイムストップ）。
+        allow_long / allow_short: 売買方向の許可。
+    """
+
+    breakout_lookback: int = 20
+    atr_length: int = 14
+    atr_stop_mult: float = 2.0
+    max_holding_days: int = 10
+    allow_long: bool = True
+    allow_short: bool = True
+
+    def __post_init__(self) -> None:
+        if self.breakout_lookback < 2:
+            raise ValueError("breakout_lookback は 2 以上")
+        if self.atr_length < 1:
+            raise ValueError("atr_length は 1 以上")
+        if self.atr_stop_mult <= 0:
+            raise ValueError("atr_stop_mult は正")
+        if self.max_holding_days < 1:
+            raise ValueError("max_holding_days は 1 以上")
+        if not (self.allow_long or self.allow_short):
+            raise ValueError("allow_long / allow_short の少なくとも一方は True")
+
+
+DEFAULT_SWING_MOMENTUM = SwingMomentumParams()
 
 
 @dataclass(frozen=True)

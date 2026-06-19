@@ -21,7 +21,7 @@ import pandas as pd
 
 if TYPE_CHECKING:
     from execution.fill_monitor import FillResult
-    from strategy.mean_reversion import Trade
+    from strategy.trade import Trade
 
 __all__ = ["Storage"]
 
