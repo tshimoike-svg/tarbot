@@ -36,8 +36,8 @@ uv run python -m backtest.runner --strategy swing_reversion --symbols config/sym
 
 ```bash
 # 1) J-Quants に無料登録（https://jpx-jquants.com/）。分足は不要・日足は無料プランで可
-# 2) 認証情報を .env に置く（.env は git 管理外）
-cp .env.example .env        # JQUANTS_MAILADDRESS / JQUANTS_PASSWORD を記入
+# 2) ダッシュボードで APIキーを発行し .env に置く（v2 は x-api-key 認証。.env は git 管理外）
+cp .env.example .env        # JQUANTS_API_KEY=発行したキー を記入
 
 # 3) 実行（両戦略を比較）
 uv run python -m backtest.runner --compare --from 2024-06-01 --to 2026-06-01

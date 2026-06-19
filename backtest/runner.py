@@ -235,7 +235,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if isinstance(exc, JQuantsAuthError):
             print(
-                "J-Quants 認証情報がありません。.env に JQUANTS_MAILADDRESS/PASSWORD を設定してください"
+                "J-Quants 認証情報がありません。.env に JQUANTS_API_KEY を設定してください"
                 "（README 参照）。"
             )
             return 2
