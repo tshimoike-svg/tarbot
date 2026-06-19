@@ -48,6 +48,7 @@ class Trade:
     exit_time: pd.Timestamp
     exit_price: float
     exit_reason: ExitReason
+    stop_price: float | None = None  # エントリー時の保護ストップ（リスク基準サイジングに使う）
 
     @property
     def pnl_gross_per_share(self) -> float:
@@ -180,6 +181,7 @@ def _walk_session(g: pd.DataFrame, params: MeanReversionParams) -> list[Trade]:
                     exit_time=ts,
                     exit_price=exit_price,
                     exit_reason=reason,
+                    stop_price=stop,
                 )
             )
             pos = None

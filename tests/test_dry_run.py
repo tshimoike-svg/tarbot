@@ -87,8 +87,8 @@ def test_dry_run_rejects_when_max_trades_zero_equivalent() -> None:
 
 
 def test_dry_run_size_too_small_rejected() -> None:
-    # 目標ノートーションを極小にして株数 < 1 → size_too_small で拒否
-    rep = _harness(target_notional_frac=0.00001).run(_dip_day("2026-01-05"), symbol="1301")
+    # 資金を極小にすると単元(100株)すら買えない → size_too_small で拒否
+    rep = _harness(account_equity=1_000.0).run(_dip_day("2026-01-05"), symbol="1301")
     assert rep.n_executed == 0
     assert any(reason == "size_too_small" for _, reason in rep.rejected)
 

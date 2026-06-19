@@ -112,6 +112,20 @@ def test_walk_long_take_profit() -> None:
     assert tr.pnl_gross_per_share == pytest.approx(2.0)
 
 
+def test_walk_sets_stop_price() -> None:
+    g = _session_frame(
+        [
+            {"t": "09:00", "high": 100.5, "low": 99.5, "close": 100, "vwap": 100, "z": 0, "atr": 2},
+            {"t": "09:01", "high": 97.5, "low": 96.5, "close": 97, "vwap": 100, "z": -2.5, "atr": 2},
+            {"t": "09:02", "high": 100.5, "low": 99.5, "close": 100, "vwap": 99, "z": -1, "atr": 2},
+            {"t": "09:03", "high": 101, "low": 100, "close": 100.5, "vwap": 99, "z": 0, "atr": 2},
+        ]
+    )
+    [tr] = _walk_session(g, _P)
+    # entry 97, atr 2, mult 1.0 → stop = 95
+    assert tr.stop_price == pytest.approx(95.0)
+
+
 def test_walk_long_stop() -> None:
     g = _session_frame(
         [

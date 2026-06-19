@@ -33,6 +33,7 @@ from config.settings import (
 )
 from execution.fill_monitor import FillMonitor, FillStats, OrderIntent, OrderSide
 from strategy.mean_reversion import Trade, generate_trades
+from strategy.position_sizer import size_position
 from strategy.risk_manager import OrderRequest, RiskManager
 
 if TYPE_CHECKING:
@@ -78,7 +79,7 @@ class DryRunHarness:
         cost_model: 往復コストモデル。疑似損益の控除に使う。
         mr_params / risk_params: 戦略・リスクのパラメータ。
         storage: 指定すれば確定トレード・約定実測を蓄積する。
-        target_notional_frac: 1トレードの目標ノートーション（資金比）。簡易サイジング。
+        unit: 単元株数（既定100）。position_sizer がこの倍数で株数を出す。
     """
 
     def __init__(
@@ -89,16 +90,16 @@ class DryRunHarness:
         mr_params: MeanReversionParams = DEFAULT_MEAN_REVERSION,
         risk_params: RiskParams = DEFAULT_RISK,
         storage: Storage | None = None,
-        target_notional_frac: float = 0.1,
+        unit: int = 100,
     ) -> None:
-        if not 0.0 < target_notional_frac <= 1.0:
-            raise ValueError("target_notional_frac は (0, 1]")
+        if unit < 1:
+            raise ValueError("unit は 1 以上")
         self.account_equity = account_equity
         self.cost_model = cost_model
         self.mr_params = mr_params
         self.risk_params = risk_params
         self.storage = storage
-        self.target_notional_frac = target_notional_frac
+        self.unit = unit
 
     def run(
         self, df: pd.DataFrame, *, symbol: str, session: pd.Series | None = None
@@ -114,6 +115,7 @@ class DryRunHarness:
         else:
             sess = pd.Series(pd.DatetimeIndex(df.index).normalize(), index=df.index)
         executed_net_returns: list[float] = []
+        realized_yens: list[float] = []
         order_seq = 0
 
         for day, day_idx in _iter_days(df, sess):
@@ -125,7 +127,8 @@ class DryRunHarness:
             for trade in trades:
                 order_seq += 1
                 outcome = self._process_trade(
-                    trade, symbol, order_seq, rm, monitor, executed_net_returns, report
+                    trade, symbol, order_seq, rm, monitor,
+                    executed_net_returns, realized_yens, report,
                 )
                 if outcome is None:
                     continue
@@ -137,9 +140,7 @@ class DryRunHarness:
 
         report.fill_stats = monitor.stats()
         report.evaluation = evaluate_trades(report.executed_trades, self.cost_model)
-        report.final_equity = self.account_equity + sum(
-            r * (self.account_equity * self.target_notional_frac) for r in executed_net_returns
-        )
+        report.final_equity = self.account_equity + sum(realized_yens)
         return report
 
     # --- 内部 --------------------------------------------------------------------
@@ -151,20 +152,28 @@ class DryRunHarness:
         rm: RiskManager,
         monitor: FillMonitor,
         net_returns: list[float],
+        realized_yens: list[float],
         report: DryRunReport,
     ) -> Trade | None:
         """1トレードを関門に通し、承認なら疑似約定・実測・蓄積する。"""
-        target_notional = self.target_notional_frac * self.account_equity
-        shares = int(target_notional // trade.entry_price)
-        if shares < 1:
+        sizing = size_position(
+            account_equity=self.account_equity,
+            entry_price=trade.entry_price,
+            risk_params=self.risk_params,
+            stop_price=trade.stop_price,
+            unit=self.unit,
+        )
+        if sizing.shares < 1:
             report.rejected.append((trade, "size_too_small"))
             return None
 
-        entry_side, exit_side = _sides(trade.side)
-        notional = shares * trade.entry_price
+        shares = sizing.shares
+        notional = sizing.notional
 
+        entry_side, exit_side = _sides(trade.side)
         entry_req = OrderRequest(
-            symbol=symbol, side=entry_side, shares=shares, price=trade.entry_price, is_entry=True
+            symbol=symbol, side=entry_side, shares=shares, price=trade.entry_price,
+            is_entry=True, risk_amount=sizing.risk_amount,
         )
         decision = rm.check_order(entry_req)
         if not decision.approved:
@@ -207,6 +216,7 @@ class DryRunHarness:
         rm.on_close(symbol, realized_pnl=realized_yen)
 
         net_returns.append(net_frac)
+        realized_yens.append(realized_yen)
 
         if self.storage is not None:
             self.storage.insert_trade(
