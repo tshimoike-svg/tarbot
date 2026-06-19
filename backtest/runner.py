@@ -115,6 +115,18 @@ def run_strategy(
     )
 
 
+def _memoize_loader(load_bars: LoadBars) -> LoadBars:
+    """銘柄ごとの取得を1回にキャッシュする（compare で二度取りしない＝API節約）。"""
+    cache: dict[str, pd.DataFrame] = {}
+
+    def _load(symbol: str) -> pd.DataFrame:
+        if symbol not in cache:
+            cache[symbol] = load_bars(symbol)
+        return cache[symbol]
+
+    return _load
+
+
 def compare_strategies(
     symbols: Sequence[str],
     load_bars: LoadBars,
@@ -125,10 +137,11 @@ def compare_strategies(
     max_drawdown_threshold: float = 0.15,
 ) -> dict[str, BacktestResult]:
     """両戦略を同条件で回して比較結果を返す。"""
+    cached = _memoize_loader(load_bars)
     return {
         name: run_strategy(
             symbols,
-            load_bars,
+            cached,
             strategy=name,
             cost_model=cost_model,
             n_splits=n_splits,
@@ -176,7 +189,13 @@ def jquants_loader(
     """
     from data.fetcher import JQuantsClient  # 遅延 import（テストは認証不要のまま）
 
-    client = JQuantsClient(base_url=base_url) if base_url else JQuantsClient()
+    # レート制限対策：リクエスト間隔を空け、リトライを厚めに
+    kwargs: dict[str, object] = {"min_interval": 1.0, "max_retries": 5, "retry_backoff": 2.0}
+    client = (
+        JQuantsClient(base_url=base_url, **kwargs)  # type: ignore[arg-type]
+        if base_url
+        else JQuantsClient(**kwargs)  # type: ignore[arg-type]
+    )
 
     def _load(symbol: str) -> pd.DataFrame:
         return client.get_daily_quotes(code=symbol, from_=from_, to=to)

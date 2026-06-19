@@ -90,6 +90,7 @@ class JQuantsClient:
         timeout: float = 30.0,
         max_retries: int = 3,
         retry_backoff: float = 0.5,
+        min_interval: float = 0.0,
         sleep: Callable[[float], None] = time.sleep,
         load_env: bool = True,
     ) -> None:
@@ -101,7 +102,9 @@ class JQuantsClient:
         self._timeout = timeout
         self._max_retries = max_retries
         self._retry_backoff = retry_backoff
+        self._min_interval = min_interval  # レート制限対策：リクエスト間の最小間隔(秒)
         self._sleep = sleep
+        self._last_request = 0.0
 
     def _require_api_key(self) -> str:
         if not self._api_key:
@@ -119,6 +122,11 @@ class JQuantsClient:
         headers = {"x-api-key": self._require_api_key()}
 
         for attempt in range(self._max_retries + 1):
+            if self._min_interval > 0:
+                elapsed = time.monotonic() - self._last_request
+                if elapsed < self._min_interval:
+                    self._sleep(self._min_interval - elapsed)
+            self._last_request = time.monotonic()
             response = self._session.request(
                 method, url, params=params, headers=headers, timeout=self._timeout
             )
