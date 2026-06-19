@@ -17,7 +17,7 @@ from __future__ import annotations
 import pandas as pd
 
 from config.settings import DEFAULT_SWING_REVERSION, SwingReversionParams
-from strategy.indicators import atr, rolling_zscore
+from strategy.indicators import atr, rolling_zscore, rsi as compute_rsi
 from strategy.swing import walk_swing
 from strategy.trade import Trade
 
@@ -72,18 +72,49 @@ def compute_signals(
 
     Returns:
         DataFrame（列：ma, zscore, atr, entry, regime）。entry は +1/-1/0。
-        regime は True=レンジ相場（エントリー許可）/ False=トレンド相場。
+        regime は True=エントリー許可 / False=除外。
     """
     _check(df)
     ma = df["close"].rolling(window=params.lookback, min_periods=params.lookback).mean()
     z = rolling_zscore(df["close"], length=params.lookback)
     atr_series = atr(df["high"], df["low"], df["close"], length=params.atr_length)
 
+    # RSI の事前計算（フィルタが有効なときのみ）
+    need_rsi = (params.allow_long and params.rsi_entry_max < 100.0) or \
+               (params.allow_short and params.rsi_entry_min > 0.0)
+    rsi_series = compute_rsi(df["close"], length=params.rsi_length) if need_rsi else None
+
+    # 出来高比率の事前計算（フィルタが有効かつ volume 列が存在するときのみ）
+    need_vol = params.volume_ratio_min > 0.0 and "volume" in df.columns
+    if need_vol:
+        vol_ma = df["volume"].rolling(
+            window=params.volume_ma_length,
+            min_periods=params.volume_ma_length // 2,
+        ).mean()
+        vol_ratio = df["volume"] / vol_ma.replace(0.0, float("nan"))
+    else:
+        vol_ratio = None
+
     entry = pd.Series(0, index=df.index, dtype="int64")
     if params.allow_long:
-        entry = entry.mask(z <= -params.entry_z, 1)
+        long_mask = z <= -params.entry_z
+        if rsi_series is not None and params.rsi_entry_max < 100.0:
+            long_mask = long_mask & (rsi_series < params.rsi_entry_max)
+        if vol_ratio is not None:
+            long_mask = long_mask & (vol_ratio > params.volume_ratio_min)
+        entry = entry.mask(long_mask, 1)
     if params.allow_short:
-        entry = entry.mask(z >= params.entry_z, -1)
+        short_mask = z >= params.entry_z
+        if rsi_series is not None and params.rsi_entry_min > 0.0:
+            short_mask = short_mask & (rsi_series > params.rsi_entry_min)
+        if vol_ratio is not None:
+            short_mask = short_mask & (vol_ratio > params.volume_ratio_min)
+        entry = entry.mask(short_mask, -1)
+
+    # 季節フィルタ（指定月はエントリー禁止）
+    if params.season_avoid_months:
+        month_ok = ~pd.DatetimeIndex(df.index).month.isin(params.season_avoid_months)
+        entry = entry.where(month_ok, other=0)
 
     # 市場レジームフィルタ
     if market_df is not None and not market_df.empty and params.enable_regime_filter:

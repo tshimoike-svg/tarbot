@@ -24,6 +24,7 @@ __all__ = [
     "atr",
     "bollinger_bands",
     "rolling_zscore",
+    "rsi",
 ]
 
 ATRMethod = Literal["wilder", "sma"]
@@ -171,6 +172,29 @@ def bollinger_bands(
             "percent_b": percent_b,
         }
     )
+
+
+def rsi(close: pd.Series, *, length: int = 14) -> pd.Series:
+    """RSI（Relative Strength Index）。Wilder の平滑化。
+
+    Wilder の EWM（alpha=1/length, adjust=False）で平均利得・平均損失を計算し
+    RSI = 100 × avg_gain / (avg_gain + avg_loss) で算出。
+    avg_gain = avg_loss = 0（フラット系列）は NaN。warmup は NaN。
+
+    Args:
+        length: 平滑化期間（既定 14）。
+
+    Returns:
+        RSI の Series（0〜100 の範囲、warmup は NaN）。
+    """
+    _validate_length(length)
+    delta = close.diff()
+    gain = delta.clip(lower=0.0)
+    loss = (-delta).clip(lower=0.0)
+    avg_gain = gain.ewm(alpha=1.0 / length, adjust=False, min_periods=length).mean()
+    avg_loss = loss.ewm(alpha=1.0 / length, adjust=False, min_periods=length).mean()
+    denom = avg_gain + avg_loss
+    return (100.0 * avg_gain / denom.replace(0.0, float("nan"))).rename("rsi")
 
 
 def rolling_zscore(series: pd.Series, *, length: int, ddof: int = 0) -> pd.Series:

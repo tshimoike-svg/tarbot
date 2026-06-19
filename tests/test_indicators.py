@@ -16,6 +16,7 @@ from strategy.indicators import (
     atr,
     bollinger_bands,
     rolling_zscore,
+    rsi,
     true_range,
     typical_price,
     vwap,
@@ -184,6 +185,63 @@ def test_bollinger_is_causal(ohlcv: pd.DataFrame) -> None:
         for col in ("middle", "upper", "lower"):
             a, b = truncated.iloc[t][col], full.iloc[t][col]
             assert a == pytest.approx(b), f"Bollinger.{col} が t={t} で未来依存"
+
+
+# --- RSI -----------------------------------------------------------------------
+def test_rsi_warmup_is_nan() -> None:
+    close = pd.Series(range(1, 20), dtype="float64")
+    r = rsi(close, length=14)
+    assert r.iloc[:14].isna().all()
+    assert not np.isnan(r.iloc[14])
+
+
+def test_rsi_range_0_100() -> None:
+    rng = np.random.default_rng(42)
+    close = pd.Series(100.0 + rng.standard_normal(200).cumsum())
+    r = rsi(close, length=14)
+    valid = r.dropna()
+    assert (valid >= 0.0).all() and (valid <= 100.0).all()
+
+
+def test_rsi_only_gains_is_100() -> None:
+    """単調増加 → avg_loss = 0 → RSI = 100。"""
+    close = pd.Series(range(1, 50), dtype="float64")
+    r = rsi(close, length=14)
+    assert r.iloc[-1] == pytest.approx(100.0)
+
+
+def test_rsi_only_losses_is_0() -> None:
+    """単調減少 → avg_gain = 0 → RSI = 0。"""
+    close = pd.Series(range(50, 1, -1), dtype="float64")
+    r = rsi(close, length=14)
+    assert r.iloc[-1] == pytest.approx(0.0)
+
+
+def test_rsi_flat_is_nan() -> None:
+    """完全フラット → avg_gain = avg_loss = 0 → NaN。"""
+    close = pd.Series([100.0] * 20)
+    r = rsi(close, length=14)
+    assert r.iloc[-1] != r.iloc[-1]  # NaN
+
+
+def test_rsi_rejects_bad_length() -> None:
+    with pytest.raises(ValueError):
+        rsi(pd.Series([1.0, 2.0]), length=0)
+
+
+def test_rsi_is_causal() -> None:
+    """truncation invariance: 系列を t で切り詰めても t の RSI 値が変わらない。"""
+    rng = np.random.default_rng(7)
+    close = pd.Series(100.0 + rng.standard_normal(40).cumsum())
+    full = rsi(close, length=14)
+    for t in range(14, len(close)):
+        truncated = rsi(close.iloc[: t + 1], length=14)
+        expected = full.iloc[t]
+        actual = truncated.iloc[t]
+        if np.isnan(expected):
+            assert np.isnan(actual)
+        else:
+            assert actual == pytest.approx(expected, rel=1e-9), f"RSI が t={t} で未来依存"
 
 
 def test_vwap_is_causal(ohlcv: pd.DataFrame) -> None:

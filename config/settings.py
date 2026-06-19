@@ -73,6 +73,15 @@ class SwingReversionParams:
     regime_ma_window: int = 60      # 市場指数の MA 期間
     regime_threshold: float = 0.03  # ±X% 以内をレンジと判定
     regime_filter_invert: bool = False  # True: トレンド期のみ入る（レンジ期を除外）
+    # 季節フィルタ（デカンショ節効果）
+    season_avoid_months: frozenset[int] = frozenset()  # 空 = 全月エントリー可
+    # RSI フィルタ（過熱感確認）
+    rsi_length: int = 14
+    rsi_entry_max: float = 100.0  # ロング: RSI < この値でのみ入る（100 = 無効）
+    rsi_entry_min: float = 0.0    # ショート: RSI > この値でのみ入る（0 = 無効）
+    # 出来高フィルタ（投げ売り / 買われ過ぎ確認）
+    volume_ratio_min: float = 0.0  # volume / vol_MA > この値でのみ入る（0 = 無効）
+    volume_ma_length: int = 20
 
     def __post_init__(self) -> None:
         if self.lookback < 2:
@@ -87,6 +96,13 @@ class SwingReversionParams:
             raise ValueError("max_holding_days は 1 以上")
         if not (self.allow_long or self.allow_short):
             raise ValueError("allow_long / allow_short の少なくとも一方は True")
+        for m in self.season_avoid_months:
+            if not (1 <= m <= 12):
+                raise ValueError(f"season_avoid_months の月は 1〜12: {m}")
+        if not (0.0 <= self.rsi_entry_max <= 100.0):
+            raise ValueError("rsi_entry_max は 0〜100")
+        if not (0.0 <= self.rsi_entry_min <= 100.0):
+            raise ValueError("rsi_entry_min は 0〜100")
 
 
 DEFAULT_SWING_REVERSION = SwingReversionParams()
