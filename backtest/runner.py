@@ -185,17 +185,22 @@ def format_result(result: BacktestResult) -> str:
 
 
 def jquants_loader(
-    *, from_: str, to: str, base_url: str | None = None, min_interval: float = 1.0
+    *, from_: str, to: str, base_url: str | None = None, min_interval: float = 13.0
 ) -> LoadBars:
     """J-Quants から日足を取得する load_bars を返す（.env の認証を使用）。
 
     実データ取得用。認証情報が無ければ最初の呼び出しで JQuantsAuthError。
-    レート制限を受けた場合は min_interval=2.0 以上に上げる（または --cache-dir で節約）。
+
+    プラン別レート制限（https://jpx-jquants.com/ja/spec/rate-limits）:
+      Free    : 5 req/min  → min_interval=13.0 (余裕を持ち 4.6req/min)
+      Light   : 60 req/min → min_interval=1.0
+      Standard: 120 req/min→ min_interval=0.5
+    大幅超過時は最大5分間ブロックされるため、disk_cached_loader との併用を推奨。
     """
     from data.fetcher import JQuantsClient  # 遅延 import（テストは認証不要のまま）
 
-    # レート制限対策：リクエスト間隔を空け、リトライを厚めに
-    kwargs: dict[str, object] = {"min_interval": min_interval, "max_retries": 8, "retry_backoff": 3.0}
+    # retry_backoff=5.0 / max_retries=8 で最大累積待機 ≈ 1275s（5分ブロック対応）
+    kwargs: dict[str, object] = {"min_interval": min_interval, "max_retries": 8, "retry_backoff": 5.0}
     client = (
         JQuantsClient(base_url=base_url, **kwargs)  # type: ignore[arg-type]
         if base_url
@@ -261,8 +266,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--cache-dir", default="data/db/bars_cache",
                         help="日足キャッシュdir（既定: data/db/bars_cache）。--no-cache で無効化")
     parser.add_argument("--no-cache", action="store_true", help="キャッシュを使わず毎回取得")
-    parser.add_argument("--min-interval", type=float, default=1.0,
-                        help="APIリクエスト間隔(秒)（既定 1.0。レート制限を受けたら 2.0 以上に）")
+    parser.add_argument("--min-interval", type=float, default=13.0,
+                        help="APIリクエスト間隔(秒)（Free=5req/min → 13秒推奨。Light=60req/min → 1秒）")
     args = parser.parse_args(argv)
 
     if args.symbols:
