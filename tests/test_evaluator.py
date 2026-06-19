@@ -20,6 +20,7 @@ from backtest.evaluator import (
     compute_trade_results,
     evaluate_trades,
     max_drawdown,
+    sized_max_drawdown,
     walk_forward,
 )
 from config.costs import CostParams
@@ -34,6 +35,7 @@ def _trade(
     day: str = "2026-01-05",
     exit_day: str | None = None,
     reason: str = "target",
+    stop_price: float | None = None,
 ) -> Trade:
     return Trade(
         side=side,
@@ -42,6 +44,7 @@ def _trade(
         exit_time=pd.Timestamp(f"{exit_day or day} 10:00"),
         exit_price=exit_price,
         exit_reason=reason,  # type: ignore[arg-type]
+        stop_price=stop_price,
     )
 
 
@@ -116,6 +119,52 @@ def test_max_drawdown_known_sequence() -> None:
 
 def test_max_drawdown_monotonic_up_is_zero() -> None:
     assert max_drawdown([0.1, 0.2, 0.05]) == pytest.approx(0.0)
+
+
+# --- sized_max_drawdown（サイジング連動DD）-----------------------------------------
+def test_sized_dd_scales_with_stop_distance() -> None:
+    free = CostModel(CostParams(spread_ticks=0.0, slippage_ticks_per_side=0.0))
+    # stop が entry の 5% 下 → size_frac = 0.005 / 0.05 = 0.10
+    # exit が entry の 10% 下（損失 -10%）→ account_return = -0.10 * 0.10 = -0.01（口座 -1%）
+    trade = _trade("long", 1000, 900, stop_price=950.0, reason="stop")
+    [res] = compute_trade_results([trade], free)
+    dd = sized_max_drawdown([res], risk_per_trade=0.005)
+    # equity: 0 → -0.01。最大DD = 0.01
+    assert dd == pytest.approx(0.01)
+
+
+def test_sized_dd_capped_by_max_size_frac() -> None:
+    free = CostModel(CostParams(spread_ticks=0.0, slippage_ticks_per_side=0.0))
+    # stop が entry の 0.1% 下（非常に狭い） → raw size = 0.005/0.001 = 5.0 → cap to max_size_frac=0.20
+    trade = _trade("long", 1000, 990, stop_price=999.0, reason="stop")
+    [res] = compute_trade_results([trade], free)
+    dd = sized_max_drawdown([res], risk_per_trade=0.005, max_size_frac=0.20)
+    # net_return = -0.01、size_frac = 0.20 → account = -0.002
+    assert dd == pytest.approx(0.002)
+
+
+def test_sized_dd_fallback_when_no_stop() -> None:
+    free = CostModel(CostParams(spread_ticks=0.0, slippage_ticks_per_side=0.0))
+    # stop_price=None → fallback 2% → size_frac = 0.005/0.02 = 0.25（max_size_fracでキャップ）
+    trade = _trade("long", 1000, 980, reason="stop")  # -2% net
+    [res] = compute_trade_results([trade], free)
+    dd = sized_max_drawdown([res], risk_per_trade=0.005, max_size_frac=0.20, fallback_stop_frac=0.02)
+    # size_frac = min(0.25, 0.20) = 0.20。account = -0.02 * 0.20 = -0.004
+    assert dd == pytest.approx(0.004)
+
+
+def test_sized_dd_is_much_smaller_than_proxy_dd() -> None:
+    """プロキシDDが大きくても、サイジング連動DDは口座への実ダメージを反映して小さい。"""
+    free = CostModel(CostParams(spread_ticks=0.0, slippage_ticks_per_side=0.0))
+    # swing_reversion的なシナリオ：entry=1000, stop=980（2%下）, exit=930（7%損）
+    # 連続10回負け
+    trades = [_trade("long", 1000, 930, stop_price=980.0, reason="stop") for _ in range(10)]
+    res = evaluate_trades(trades, free)
+    # プロキシDD：-7%×10 = 70%相当（連続loss）
+    assert res.max_drawdown > 0.5
+    # sized DD：size=0.005/0.02=0.25→cap 0.20、account=-0.07*0.20=-0.014/トレード → 累積-0.14
+    assert res.sized_max_drawdown < res.max_drawdown
+    assert res.sized_max_drawdown < 0.30  # 口座への実ダメージは現実的な範囲
 
 
 # --- ウォークフォワード ------------------------------------------------------------

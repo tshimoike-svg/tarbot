@@ -170,12 +170,13 @@ def format_result(result: BacktestResult) -> str:
         f"  期待値(コスト控除後)  : {e.expectancy:+.5f}  （グロス {e.gross_expectancy:+.5f}）",
         f"  平均コスト            : {e.mean_cost:.5f}",
         f"  勝率 / PF             : {e.win_rate:.1%} / {e.profit_factor:.2f}",
-        f"  最大DD(プロキシ)      : {e.max_drawdown:.2%}",
+        f"  最大DD(プロキシ)      : {e.max_drawdown:.2%}  口座DD(0.5%リスク): {e.sized_max_drawdown:.2%}",
         f"  出口理由              : {e.by_exit_reason}",
         f"  ウォークフォワード    : [{fold_exp}]",
         f"  Phase0ゲート          : {'PASS' if g.passed else 'FAIL'} "
         f"(期待値+:{g.expectancy_positive} 回数:{g.enough_trades} "
-        f"DD:{g.drawdown_ok} 区間安定:{g.walkforward_stable})",
+        f"DD:{g.drawdown_ok}[{g.sized_max_drawdown:.2%}<{g.max_drawdown_threshold:.0%}] "
+        f"区間安定:{g.walkforward_stable})",
     ]
     return "\n".join(lines)
 
