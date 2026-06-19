@@ -20,6 +20,8 @@ __all__ = [
     "DEFAULT_SWING_REVERSION",
     "SwingMomentumParams",
     "DEFAULT_SWING_MOMENTUM",
+    "SwingCrossSectionParams",
+    "DEFAULT_CROSS_SECTION",
     "RiskParams",
     "DEFAULT_RISK",
 ]
@@ -66,6 +68,11 @@ class SwingReversionParams:
     max_holding_days: int = 10
     allow_long: bool = True
     allow_short: bool = True
+    # 市場レジームフィルタ：市場全体が特定レジームのときだけエントリーを許可
+    enable_regime_filter: bool = False
+    regime_ma_window: int = 60      # 市場指数の MA 期間
+    regime_threshold: float = 0.03  # ±X% 以内をレンジと判定
+    regime_filter_invert: bool = False  # True: トレンド期のみ入る（レンジ期を除外）
 
     def __post_init__(self) -> None:
         if self.lookback < 2:
@@ -122,6 +129,53 @@ class SwingMomentumParams:
 
 
 DEFAULT_SWING_MOMENTUM = SwingMomentumParams()
+
+
+@dataclass(frozen=True)
+class SwingCrossSectionParams:
+    """日足クロスセクション平均回帰のパラメータ。
+
+    各日にユニバース全銘柄のN日リターンをクロスセクションでz化し、
+    ピア対比で大きく劣後した銘柄をロング・大きく優位した銘柄をショート。
+    市場全体のβが消えるのでトレンド方向に依存しない（市場中立）。
+
+    Attributes:
+        return_lookback: クロスセクションランキングに使うN日リターンの窓（日）。
+        entry_z: エントリー閾値（σ）。cs_z <= -entry_z でロング、>= +entry_z でショート。
+        atr_length: ATR 期間（日）。
+        atr_stop_mult: 損切り幅 = atr_stop_mult × ATR。
+        max_holding_days: 最大保有日数（タイムストップ）。
+        allow_long / allow_short: 売買方向の許可。
+        min_universe_size: クロスセクション統計が信頼できる最低銘柄数。
+    """
+
+    return_lookback: int = 20
+    entry_z: float = 1.5
+    atr_length: int = 14
+    atr_stop_mult: float = 2.0
+    max_holding_days: int = 10
+    allow_long: bool = True
+    allow_short: bool = True
+    min_universe_size: int = 10
+
+    def __post_init__(self) -> None:
+        if self.return_lookback < 2:
+            raise ValueError("return_lookback は 2 以上")
+        if self.entry_z <= 0:
+            raise ValueError("entry_z は正")
+        if self.atr_length < 1:
+            raise ValueError("atr_length は 1 以上")
+        if self.atr_stop_mult <= 0:
+            raise ValueError("atr_stop_mult は正")
+        if self.max_holding_days < 1:
+            raise ValueError("max_holding_days は 1 以上")
+        if not (self.allow_long or self.allow_short):
+            raise ValueError("allow_long / allow_short の少なくとも一方は True")
+        if self.min_universe_size < 2:
+            raise ValueError("min_universe_size は 2 以上")
+
+
+DEFAULT_CROSS_SECTION = SwingCrossSectionParams()
 
 
 @dataclass(frozen=True)

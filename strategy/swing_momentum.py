@@ -56,7 +56,10 @@ def compute_signals(
 
 
 def generate_trades(
-    df: pd.DataFrame, params: SwingMomentumParams = DEFAULT_SWING_MOMENTUM
+    df: pd.DataFrame,
+    params: SwingMomentumParams = DEFAULT_SWING_MOMENTUM,
+    *,
+    market_df: pd.DataFrame | None = None,  # swing_reversion との共通シグネチャ（現状は無視）
 ) -> list[Trade]:
     """日足 OHLC からブレイクアウトのトレード列を生成（グロス）。"""
     signals = compute_signals(df, params)

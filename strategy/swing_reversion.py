@@ -4,6 +4,10 @@
 回帰で利確、ATR で損切り、max_holding_days でタイムストップ。日足なので J-Quants の
 無料/有料データで**そのままバックテスト可能**。
 
+市場レジームフィルタ（params.enable_regime_filter=True + market_df を渡す）：
+  市場指数（例: TOPIX ETF 1306）の MA(regime_ma_window) から ±regime_threshold% 以内の
+  レンジ相場のときだけエントリーを許可。トレンド相場では個別株の平均回帰が成立しにくいため。
+
 責務境界：本モジュールはグロス（コスト控除前）のトレード列を出すだけ。コスト控除後
 （持ち越し金利含む）の合否は evaluator が判定する（絶対原則3）。
 """
@@ -30,13 +34,45 @@ def _check(df: pd.DataFrame) -> None:
         raise ValueError("df は時刻昇順である必要があります")
 
 
+def _market_regime_mask(
+    market_df: pd.DataFrame,
+    target_index: pd.DatetimeIndex,
+    *,
+    ma_window: int,
+    threshold: float,
+    invert: bool = False,
+) -> pd.Series:
+    """各日付について市場がエントリー許可レジームか（前日終値基準・ルックアヘッドなし）。
+
+    shift(1) で前日の終値・MA を参照するため当日のデータを先読みしない。
+    target_index に市場データが無い日（休場の翌日など）は前の値を前向きに埋め（ffill）、
+    データ不足（MA計算前）はエントリー許可（True）とする。
+
+    invert=False（既定）: MA60 ±threshold% 以内の「レンジ相場」のときエントリー許可。
+    invert=True         : MA60 ±threshold% 外の「トレンド相場」のときエントリー許可。
+    """
+    close = market_df["close"]
+    prev_close = close.shift(1)
+    ma = prev_close.rolling(window=ma_window, min_periods=ma_window // 2).mean()
+    in_range = ((prev_close / ma - 1).abs() < threshold).fillna(True)
+    mask = (~in_range) if invert else in_range
+    return mask.reindex(target_index, method="ffill").fillna(True)
+
+
 def compute_signals(
-    df: pd.DataFrame, params: SwingReversionParams = DEFAULT_SWING_REVERSION
+    df: pd.DataFrame,
+    params: SwingReversionParams = DEFAULT_SWING_REVERSION,
+    *,
+    market_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """指標とエントリーシグナルを計算（因果・未来非参照）。
 
+    Args:
+        market_df: 市場レジームフィルタ用の指数 OHLCV（params.enable_regime_filter=True 時に使用）。
+
     Returns:
-        DataFrame（列：ma, zscore, atr, entry）。entry は +1/-1/0。
+        DataFrame（列：ma, zscore, atr, entry, regime）。entry は +1/-1/0。
+        regime は True=レンジ相場（エントリー許可）/ False=トレンド相場。
     """
     _check(df)
     ma = df["close"].rolling(window=params.lookback, min_periods=params.lookback).mean()
@@ -49,14 +85,33 @@ def compute_signals(
     if params.allow_short:
         entry = entry.mask(z >= params.entry_z, -1)
 
-    return pd.DataFrame({"ma": ma, "zscore": z, "atr": atr_series, "entry": entry})
+    # 市場レジームフィルタ
+    if market_df is not None and not market_df.empty and params.enable_regime_filter:
+        regime = _market_regime_mask(
+            market_df, pd.DatetimeIndex(df.index),
+            ma_window=params.regime_ma_window,
+            threshold=params.regime_threshold,
+            invert=params.regime_filter_invert,
+        )
+        entry = entry.where(regime, other=0)
+    else:
+        regime = pd.Series(True, index=df.index)
+
+    return pd.DataFrame({"ma": ma, "zscore": z, "atr": atr_series, "entry": entry, "regime": regime})
 
 
 def generate_trades(
-    df: pd.DataFrame, params: SwingReversionParams = DEFAULT_SWING_REVERSION
+    df: pd.DataFrame,
+    params: SwingReversionParams = DEFAULT_SWING_REVERSION,
+    *,
+    market_df: pd.DataFrame | None = None,
 ) -> list[Trade]:
-    """日足 OHLC からスイング平均回帰のトレード列を生成（グロス）。"""
-    signals = compute_signals(df, params)
+    """日足 OHLC からスイング平均回帰のトレード列を生成（グロス）。
+
+    Args:
+        market_df: 市場レジームフィルタ用の指数 OHLCV（省略時はフィルタなし）。
+    """
+    signals = compute_signals(df, params, market_df=market_df)
     return walk_swing(
         df,
         entries=signals["entry"],

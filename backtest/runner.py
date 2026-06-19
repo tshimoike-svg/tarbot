@@ -34,7 +34,7 @@ from backtest.evaluator import (
     walk_forward,
 )
 from config.costs import LiquidityTier, get_cost_params
-from strategy import swing_momentum, swing_reversion
+from strategy import swing_cross_section, swing_momentum, swing_reversion
 from strategy.trade import Trade
 
 __all__ = [
@@ -42,6 +42,7 @@ __all__ = [
     "BacktestResult",
     "STRATEGIES",
     "run_strategy",
+    "run_cross_section_strategy",
     "compare_strategies",
     "format_result",
     "jquants_loader",
@@ -75,15 +76,18 @@ def _collect_trades(
     symbols: Sequence[str],
     load_bars: LoadBars,
     generate: Callable[[pd.DataFrame], list[Trade]],
+    *,
+    generate_kwargs: dict[str, object] | None = None,
 ) -> list[Trade]:
     """全銘柄のトレードを集めて entry_time 昇順に並べる。"""
     trades: list[Trade] = []
+    kw = generate_kwargs or {}
     for symbol in symbols:
         df = load_bars(symbol)
         if df.empty:
             logger.warning("銘柄 %s の日足が空。スキップ", symbol)
             continue
-        trades.extend(generate(df))
+        trades.extend(generate(df, **kw))
     trades.sort(key=lambda t: t.entry_time)
     return trades
 
@@ -97,12 +101,26 @@ def run_strategy(
     n_splits: int = 4,
     min_trades: int = 300,
     max_drawdown_threshold: float = 0.15,
+    market_df: pd.DataFrame | None = None,
+    rev_params: object | None = None,
 ) -> BacktestResult:
-    """1戦略を全銘柄で回し、コスト控除後で評価・ゲート判定する。"""
+    """1戦略を全銘柄で回し、コスト控除後で評価・ゲート判定する。
+
+    market_df: 市場レジームフィルタ用の指数 OHLCV（swing_reversion のみ有効）。
+    rev_params: SwingReversionParams の上書き（--regime 使用時にレジームフィルタ付きパラメータを渡す）。
+    """
     if strategy not in STRATEGIES:
         raise ValueError(f"未知の戦略: {strategy}（{list(STRATEGIES)}）")
     generate = STRATEGIES[strategy]
-    trades = _collect_trades(symbols, load_bars, generate)
+    generate_kwargs: dict[str, object] = {}
+    if market_df is not None:
+        generate_kwargs["market_df"] = market_df
+    if rev_params is not None and strategy == "swing_reversion":
+        generate_kwargs["params"] = rev_params
+    trades = _collect_trades(
+        symbols, load_bars, generate,
+        generate_kwargs=generate_kwargs if generate_kwargs else None,
+    )
 
     evaluation = evaluate_trades(trades, cost_model)
     folds = walk_forward(trades, cost_model, n_splits=n_splits)
@@ -112,6 +130,50 @@ def run_strategy(
     return BacktestResult(
         strategy=strategy,
         n_symbols=len(symbols),
+        evaluation=evaluation,
+        walk_forward=folds,
+        gate=gate,
+    )
+
+
+def run_cross_section_strategy(
+    symbols: Sequence[str],
+    load_bars: LoadBars,
+    *,
+    cost_model: CostModel,
+    n_splits: int = 4,
+    min_trades: int = 300,
+    max_drawdown_threshold: float = 0.15,
+    cs_params: object | None = None,
+) -> BacktestResult:
+    """クロスセクション平均回帰戦略を全銘柄で回し、コスト控除後で評価・ゲート判定する。
+
+    全銘柄データを一括ロードしてからクロスセクションzを計算するため、
+    run_strategy とは異なるデータフロー（dict渡し）を使う。
+    """
+    from config.settings import DEFAULT_CROSS_SECTION, SwingCrossSectionParams
+
+    params = cs_params if isinstance(cs_params, SwingCrossSectionParams) else DEFAULT_CROSS_SECTION
+
+    all_dfs: dict[str, pd.DataFrame] = {}
+    for sym in symbols:
+        df = load_bars(sym)
+        if not df.empty:
+            all_dfs[sym] = df
+        else:
+            logger.warning("銘柄 %s の日足が空。スキップ", sym)
+
+    trades = swing_cross_section.generate_trades(all_dfs, params)
+    trades.sort(key=lambda t: t.entry_time)
+
+    evaluation = evaluate_trades(trades, cost_model)
+    folds = walk_forward(trades, cost_model, n_splits=n_splits)
+    gate = check_phase0_gate(
+        evaluation, folds, min_trades=min_trades, max_drawdown_threshold=max_drawdown_threshold
+    )
+    return BacktestResult(
+        strategy="swing_cross_section",
+        n_symbols=len(all_dfs),
         evaluation=evaluation,
         walk_forward=folds,
         gate=gate,
@@ -138,6 +200,8 @@ def compare_strategies(
     n_splits: int = 4,
     min_trades: int = 300,
     max_drawdown_threshold: float = 0.15,
+    market_df: pd.DataFrame | None = None,
+    rev_params: object | None = None,
 ) -> dict[str, BacktestResult]:
     """両戦略を同条件で回して比較結果を返す。"""
     cached = _memoize_loader(load_bars)
@@ -150,6 +214,8 @@ def compare_strategies(
             n_splits=n_splits,
             min_trades=min_trades,
             max_drawdown_threshold=max_drawdown_threshold,
+            market_df=market_df,
+            rev_params=rev_params,
         )
         for name in STRATEGIES
     }
@@ -254,8 +320,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     """CLI エントリポイント。"""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     from_default, to_default = _default_dates()
+    _all_strategies = list(STRATEGIES) + ["swing_cross_section"]
     parser = argparse.ArgumentParser(description="日足スイングのバックテスト（Phase 0）")
-    parser.add_argument("--strategy", choices=list(STRATEGIES), default="swing_reversion")
+    parser.add_argument("--strategy", choices=_all_strategies, default="swing_reversion")
     parser.add_argument("--compare", action="store_true", help="両戦略を比較")
     parser.add_argument("--symbols", default=None, help="カンマ区切りの銘柄コード（省略時 config/symbols.py）")
     parser.add_argument("--from", dest="from_", default=from_default, help="開始日 YYYY-MM-DD")
@@ -268,6 +335,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--no-cache", action="store_true", help="キャッシュを使わず毎回取得")
     parser.add_argument("--min-interval", type=float, default=13.0,
                         help="APIリクエスト間隔(秒)（Free=5req/min → 13秒推奨。Light=60req/min → 1秒）")
+    parser.add_argument("--regime", action="store_true",
+                        help="市場レジームフィルタを有効化（レンジ相場のときだけエントリー）")
+    parser.add_argument("--regime-symbol", default="1306",
+                        help="レジーム判定に使う指数 ETF コード（既定 1306=TOPIX ETF）")
+    parser.add_argument("--regime-window", type=int, default=60,
+                        help="レジーム判定の MA 窓（日）")
+    parser.add_argument("--regime-threshold", type=float, default=0.03,
+                        help="レンジ判定の閾値（±X% 以内 → レンジ）")
+    parser.add_argument("--regime-invert", action="store_true",
+                        help="レジームフィルタを反転（トレンド期のみエントリー）")
     args = parser.parse_args(argv)
 
     if args.symbols:
@@ -287,17 +364,49 @@ def main(argv: Sequence[str] | None = None) -> int:
         load_bars = raw_loader if args.no_cache else disk_cached_loader(
             raw_loader, from_=args.from_, to=args.to, cache_dir=args.cache_dir
         )
+
+        # 市場レジームフィルタ用データ取得
+        market_df: pd.DataFrame | None = None
+        rev_params: object | None = None
+        if args.regime:
+            from config.settings import SwingReversionParams as _RevP
+            logger.info("レジームフィルタ用データを取得中（%s）...", args.regime_symbol)
+            market_df = load_bars(args.regime_symbol)
+            if market_df.empty:
+                logger.warning("レジーム用データが空。フィルタなしで実行します")
+                market_df = None
+            else:
+                logger.info(
+                    "レジームフィルタ有効: MA%d ±%.0f%%",
+                    args.regime_window, args.regime_threshold * 100,
+                )
+                rev_params = _RevP(
+                    lookback=30, entry_z=2.5, atr_stop_mult=2.5, max_holding_days=14,
+                    enable_regime_filter=True,
+                    regime_ma_window=args.regime_window,
+                    regime_threshold=args.regime_threshold,
+                    regime_filter_invert=args.regime_invert,
+                )
+
         if args.compare:
             results = compare_strategies(
                 symbols, load_bars, cost_model=cost_model,
                 n_splits=args.n_splits, min_trades=args.min_trades,
+                market_df=market_df, rev_params=rev_params,
             )
             for res in results.values():
                 print(format_result(res))
+        elif args.strategy == "swing_cross_section":
+            res = run_cross_section_strategy(
+                symbols, load_bars, cost_model=cost_model,
+                n_splits=args.n_splits, min_trades=args.min_trades,
+            )
+            print(format_result(res))
         else:
             res = run_strategy(
                 symbols, load_bars, strategy=args.strategy, cost_model=cost_model,
                 n_splits=args.n_splits, min_trades=args.min_trades,
+                market_df=market_df, rev_params=rev_params,
             )
             print(format_result(res))
     except Exception as exc:  # noqa: BLE001 - CLI 最外殻で握って案内
