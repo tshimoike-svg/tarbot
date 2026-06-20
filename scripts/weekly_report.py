@@ -25,7 +25,7 @@ load_dotenv(_ROOT / ".env")
 
 from data.signal_store import SignalStore
 from notification.email_reporter import send_report
-from notification.line_notifier import send as line_send
+from notification.push_notifier import send as push_send
 
 logger = logging.getLogger(__name__)
 
@@ -147,8 +147,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.stdout:
         subject = f"【Phase1 週次レポート】{as_of}"
         sent_mail = send_report(subject, report)
-        sent_line = line_send(report[:1000])  # LINE は 1000 文字制限を考慮
-        if not sent_mail and not sent_line:
+        sent_push = push_send(title=subject, body=report[:1000])
+        if not sent_mail and not sent_push:
             logger.warning("メール・LINE ともに送信されませんでした（認証情報を .env に設定してください）")
 
     return 0

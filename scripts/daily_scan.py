@@ -44,7 +44,7 @@ from config.symbols import SYMBOLS
 from data.daily_loader import build_daily_loader
 from data.signal_store import ForwardSignal, SignalStore
 from data.us_loader import load_spx_fresh
-from notification.line_notifier import send_close_alert, send_signal_alert
+from notification.push_notifier import send_close_alert, send_signal_alert
 from strategy.swing_reversion import compute_signals
 
 logger = logging.getLogger(__name__)
