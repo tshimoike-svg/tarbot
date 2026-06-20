@@ -49,6 +49,7 @@ config/credentials.json
 data/raw/
 data/cache/
 data/db/*
+!data/db/.gitkeep
 *.sqlite
 *.sqlite3
 *.db
