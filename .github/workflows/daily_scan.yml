@@ -1,0 +1,63 @@
+name: Phase 1 日次シグナルスキャン
+
+# 平日 6:00 AM JST (= UTC 前日 21:00) に自動実行
+# 手動実行: GitHub → Actions → Run workflow でも起動可能
+on:
+  schedule:
+    - cron: '0 21 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # forward_signals.sqlite をコミットするために必要
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90   # J-Quants 全銘柄初回取得（5 req/min × 180 銘柄 = 約 40 分）
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: uv セットアップ
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: 依存パッケージをインストール
+        run: uv sync
+
+      - name: J-Quants 日足キャッシュを復元
+        uses: actions/cache@v4
+        with:
+          path: data/db/daily_scan_cache
+          # run_id ベースのキーで毎回新規保存、前回のキャッシュから差分更新
+          key: jquants-bars-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            jquants-bars-${{ runner.os }}-
+
+      - name: S&P500 キャッシュを復元
+        uses: actions/cache@v4
+        with:
+          path: data/db/us_spx_cache
+          key: us-spx-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            us-spx-${{ runner.os }}-
+
+      - name: シグナルスキャン実行
+        env:
+          JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        run: uv run python scripts/daily_scan.py --all-configs
+
+      - name: forward_signals.sqlite をコミット
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/db/forward_signals.sqlite
+          # 変更があるときだけコミット（シグナルなし日はスキップ）
+          git diff --cached --quiet || git commit -m "chore: forward signals $(date -u +%Y-%m-%d)"
+          git push

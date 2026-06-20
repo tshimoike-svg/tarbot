@@ -48,7 +48,7 @@ config/credentials.json
 # ===== データ・DB（再取得可能/大容量なのでコミットしない） =====
 data/raw/
 data/cache/
-data/db/
+data/db/*
 *.sqlite
 *.sqlite3
 *.db
@@ -57,6 +57,8 @@ data/db/
 *.csv
 !config/**/*.csv
 !tests/**/*.csv
+# フォワードシグナルDB は GitHub Actions で共有するため追跡する（*.sqlite より後ろに書いて優先）
+!data/db/forward_signals.sqlite
 
 # ===== バックテスト成果物・ログ =====
 backtest/results/

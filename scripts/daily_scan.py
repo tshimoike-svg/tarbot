@@ -44,6 +44,7 @@ from config.symbols import SYMBOLS
 from data.daily_loader import build_daily_loader
 from data.signal_store import ForwardSignal, SignalStore
 from data.us_loader import load_spx_fresh
+from notification.line_notifier import send_close_alert, send_signal_alert
 from strategy.swing_reversion import compute_signals
 
 logger = logging.getLogger(__name__)
@@ -142,11 +143,14 @@ def main(argv: list[str] | None = None) -> int:
     with SignalStore(args.db) as store:
         # 4. オープンポジションの出口チェック
         open_sigs = store.get_open_signals()
+        closed_records: list[dict] = []
         if open_sigs:
             logger.info("オープンシグナル %d 件の出口チェック中...", len(open_sigs))
-            closed_count = _check_exits(open_sigs, store, load_bars, cost_model, today, args.dry)
+            closed_count, closed_records = _check_exits(open_sigs, store, load_bars, cost_model, today, args.dry)
             if closed_count:
                 logger.info("  → %d 件クローズ", closed_count)
+                if not args.dry:
+                    send_close_alert(closed_records)
 
         # 5. 新規シグナル検出（前日 T のデータ）
         all_new: dict[str, list[ForwardSignal]] = {}
@@ -159,7 +163,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             all_new[config_name] = new_sigs
 
-        # 6. 出力
+        # 6. LINE 通知（dry モードはスキップ）
+        if not args.dry:
+            send_signal_alert(signal_date, {k: v for k, v in all_new.items()})
+
+        # 7. 出力
         _print_report(all_new, store, signal_date, today)
 
     return 0
@@ -234,9 +242,10 @@ def _check_exits(
     cost_model: CostModel,
     today: date,
     dry: bool,
-) -> int:
+) -> tuple[int, list[dict]]:
     """オープンシグナルの出口条件を昨日の OHLC で判定してクローズする。"""
     closed = 0
+    closed_records: list[dict] = []
     yesterday = (today - timedelta(days=1)).isoformat()
 
     for sig in open_sigs:
@@ -297,10 +306,11 @@ def _check_exits(
                     "  クローズ: %s(%s) → %s @ %.0f  net %+.2f%%",
                     symbol, config_label(sig["config_name"]), exit_reason, exit_price, net * 100,
                 )
+                closed_records.append({**sig, "exit_reason": exit_reason, "net_return": net})
                 closed += 1
                 break
 
-    return closed
+    return closed, closed_records
 
 
 # ── レポート出力 ────────────────────────────────────────────────────────────────
