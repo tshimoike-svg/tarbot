@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 from config.settings import DEFAULT_SWING_REVERSION, SwingReversionParams
@@ -59,16 +61,49 @@ def _market_regime_mask(
     return mask.reindex(target_index, method="ffill").fillna(True)
 
 
+def _us_return_for_signal(
+    us_df: pd.DataFrame,
+    target_index: pd.DatetimeIndex,
+    *,
+    day_offset: int,
+) -> pd.Series:
+    """US リターンを日本取引日に対応付ける汎用ヘルパー。
+
+    day_offset=1 （T-1）: 日本シグナル日 T の前日 US（= T 始値を動かした夜）。
+      例: 日本火曜 T → US 月曜 → 月曜リターン（月曜終値/金曜終値-1）。
+      用途: 押し目の起点確認。シグナル生成時点（T 終値 15:30）で既知。
+
+    day_offset=0 （T0）: 日本シグナル日 T と同日の US（JST T+1 05:00 閉場）。
+      例: 日本火曜 T → US 火曜 → 火曜リターン（火曜終値/月曜終値-1）。
+      用途: エントリー当日 T+1 の始値を動かした US。T+1 09:00 より前に判明するため先読みなし。
+
+    target_index は単調増加前提（_check で保証済み）。
+    """
+    close = us_df["close"]
+    us_ret = close.pct_change().dropna()
+    idx = pd.DatetimeIndex(us_ret.index)
+    if idx.tz is not None:
+        idx = idx.tz_convert("UTC").tz_localize(None)
+    idx = idx.as_unit("ns")
+    us_df_tmp = pd.DataFrame({"us_date": idx, "us_ret": us_ret.values}).sort_values("us_date")
+    lookup = (pd.DatetimeIndex(target_index) - pd.Timedelta(days=day_offset)).as_unit("ns")
+    japan_df = pd.DataFrame({"lookup_date": lookup})
+    merged = pd.merge_asof(japan_df, us_df_tmp, left_on="lookup_date", right_on="us_date", direction="backward")
+    return pd.Series(merged["us_ret"].values, index=target_index, name=f"us_ret_t{day_offset}")
+
+
 def compute_signals(
     df: pd.DataFrame,
     params: SwingReversionParams = DEFAULT_SWING_REVERSION,
     *,
     market_df: pd.DataFrame | None = None,
+    us_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """指標とエントリーシグナルを計算（因果・未来非参照）。
 
     Args:
         market_df: 市場レジームフィルタ用の指数 OHLCV（params.enable_regime_filter=True 時に使用）。
+        us_df: 前日米国株リターンフィルタ用の S&P500 OHLCV（params.us_crash_threshold 等と組み合わせて使用）。
 
     Returns:
         DataFrame（列：ma, zscore, atr, entry, regime）。entry は +1/-1/0。
@@ -116,6 +151,38 @@ def compute_signals(
         month_ok = ~pd.DatetimeIndex(df.index).month.isin(params.season_avoid_months)
         entry = entry.where(month_ok, other=0)
 
+    # 米国株リターンフィルタ（T-1 前日 AND T0 当日早朝 の 2 層、両方有効なら AND）
+    if us_df is not None and not us_df.empty:
+        japan_idx = pd.DatetimeIndex(df.index)
+        combined_allow = pd.Series(True, index=df.index)  # 全日許可から絞り込む
+
+        for day_offset, crash_attr, smin_attr, smax_attr, rec_attr in (
+            (1, "us_t1_crash_threshold", "us_t1_soft_min", "us_t1_soft_max", "us_t1_recovery_min"),
+            (0, "us_t0_crash_threshold", "us_t0_soft_min", "us_t0_soft_max", "us_t0_recovery_min"),
+        ):
+            _crash = getattr(params, crash_attr)
+            _smin  = getattr(params, smin_attr)
+            _rec   = getattr(params, rec_attr)
+            _has_crash    = not math.isnan(_crash)
+            _has_soft     = not math.isnan(_smin)
+            _has_recovery = not math.isnan(_rec)
+            if not _has_crash and not _has_soft and not _has_recovery:
+                continue  # このオフセットのフィルタは無効 → スキップ
+            us_ret = _us_return_for_signal(us_df, japan_idx, day_offset=day_offset)
+            layer_allow = pd.Series(False, index=df.index)
+            if _has_crash:
+                layer_allow = layer_allow | (us_ret < _crash)
+            if _has_soft:
+                _smax = getattr(params, smax_attr)
+                layer_allow = layer_allow | ((us_ret >= _smin) & (us_ret < _smax))
+            if _has_recovery:
+                layer_allow = layer_allow | (us_ret >= _rec)
+            # US データ欠損日（祝日等）は NaN → その日は許可（ブロックしない）
+            layer_allow = layer_allow.fillna(True)
+            combined_allow = combined_allow & layer_allow
+
+        entry = entry.where(combined_allow.values, other=0)
+
     # 市場レジームフィルタ
     if market_df is not None and not market_df.empty and params.enable_regime_filter:
         regime = _market_regime_mask(
@@ -136,13 +203,15 @@ def generate_trades(
     params: SwingReversionParams = DEFAULT_SWING_REVERSION,
     *,
     market_df: pd.DataFrame | None = None,
+    us_df: pd.DataFrame | None = None,
 ) -> list[Trade]:
     """日足 OHLC からスイング平均回帰のトレード列を生成（グロス）。
 
     Args:
         market_df: 市場レジームフィルタ用の指数 OHLCV（省略時はフィルタなし）。
+        us_df: 前日米国株リターンフィルタ用の S&P500 OHLCV（省略時はフィルタなし）。
     """
-    signals = compute_signals(df, params, market_df=market_df)
+    signals = compute_signals(df, params, market_df=market_df, us_df=us_df)
     return walk_swing(
         df,
         entries=signals["entry"],

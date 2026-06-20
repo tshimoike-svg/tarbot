@@ -11,6 +11,7 @@ CLAUDE.md 絶対原則：
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 
@@ -82,6 +83,28 @@ class SwingReversionParams:
     # 出来高フィルタ（投げ売り / 買われ過ぎ確認）
     volume_ratio_min: float = 0.0  # volume / vol_MA > この値でのみ入る（0 = 無効）
     volume_ma_length: int = 20
+    # 米国株（S&P500）リターンフィルタ — T-1 日（前日）と T0 日（当日早朝）の 2 層
+    #
+    # T-1 フィルタ（us_t1_*）: シグナル日 T の前日 US 終値が弱いときのみ入る
+    #   → 日本 T 日始値を動かした前の夜の US。T の前日終値で「押し目の起点」を確認。
+    #
+    # T0 フィルタ（us_t0_*）: シグナル日 T の当日 US 終値（JST T+1 05:00 閉場）が弱いときのみ入る
+    #   → 日本 T+1 始値を直接動かす US。エントリー（T+1 09:00）より前に判明するため先読みなし。
+    #   → 「US が当日回復した日は入らない」という本質的なフィルタ。
+    #
+    # フィルタ論理: (T-1 許可) AND (T0 許可)。両方 nan なら無効（全日エントリー可）。
+    # 各フィルタの許可条件: (ret < crash) OR (soft_min <= ret < soft_max)
+    # アグレッシブ設定例（両方）:
+    #   us_t1_crash_threshold=-0.02, us_t1_soft_min=-0.005, us_t1_soft_max=0.0
+    #   us_t0_crash_threshold=-0.02, us_t0_soft_min=-0.005, us_t0_soft_max=0.0
+    us_t1_crash_threshold: float = float("nan")   # T-1 US ret < この値でエントリー許可 (nan=無効)
+    us_t1_soft_min: float = float("nan")           # T-1 US ret [soft_min, soft_max) でもエントリー許可
+    us_t1_soft_max: float = float("nan")           # (nan=無効)
+    us_t1_recovery_min: float = float("nan")       # T-1 US ret >= この値でもエントリー許可（反発確認）
+    us_t0_crash_threshold: float = float("nan")   # T0 US ret < この値でエントリー許可 (nan=無効)
+    us_t0_soft_min: float = float("nan")           # T0 US ret [soft_min, soft_max) でもエントリー許可
+    us_t0_soft_max: float = float("nan")           # (nan=無効)
+    us_t0_recovery_min: float = float("nan")       # T0 US ret >= この値でもエントリー許可（反発確認）
 
     def __post_init__(self) -> None:
         if self.lookback < 2:
@@ -103,6 +126,13 @@ class SwingReversionParams:
             raise ValueError("rsi_entry_max は 0〜100")
         if not (0.0 <= self.rsi_entry_min <= 100.0):
             raise ValueError("rsi_entry_min は 0〜100")
+        for prefix in ("us_t1", "us_t0"):
+            smin = getattr(self, f"{prefix}_soft_min")
+            smax = getattr(self, f"{prefix}_soft_max")
+            if math.isnan(smin) != math.isnan(smax):
+                raise ValueError(f"{prefix}_soft_min と {prefix}_soft_max は両方指定するか両方 nan にすること")
+            if not math.isnan(smin) and smin >= smax:
+                raise ValueError(f"{prefix}_soft_min は {prefix}_soft_max より小さくすること")
 
 
 DEFAULT_SWING_REVERSION = SwingReversionParams()

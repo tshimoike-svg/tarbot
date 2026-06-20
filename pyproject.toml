@@ -33,6 +33,7 @@ dev = [
     "mypy>=1.13",
     "pandas-stubs>=3.0.3.260530",
     "types-requests>=2.33.0.20260518",
+    "yfinance>=1.4.1",
 ]
 
 [tool.uv]

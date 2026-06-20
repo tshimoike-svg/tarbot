@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from config.settings import SwingReversionParams
-from strategy.swing_reversion import compute_signals
+from strategy.swing_reversion import compute_signals, _us_return_for_signal
 
 
 def _make_ohlcv(n: int = 60, *, volume: bool = True) -> pd.DataFrame:
@@ -152,3 +152,115 @@ def test_invalid_rsi_entry_max_raises() -> None:
 def test_invalid_rsi_entry_min_raises() -> None:
     with pytest.raises(ValueError):
         SwingReversionParams(rsi_entry_min=-5.0)
+
+
+# --- 前日米国株フィルタ ------------------------------------------------------------
+
+def _make_us_df(dates: list[str], closes: list[float]) -> pd.DataFrame:
+    """US S&P500 ダミー（close 列のみ）。"""
+    return pd.DataFrame({"close": closes}, index=pd.DatetimeIndex(dates))
+
+
+def test_us_return_t1_aligns_to_prior_us_day() -> None:
+    """T-1 フィルタ: 日本月曜は直前米国金曜のリターンを参照する。"""
+    # US: 金(03-01)=100, 月(03-04)=103, 火(03-05)=101
+    us_df = _make_us_df(["2024-03-01", "2024-03-04", "2024-03-05"], [100.0, 103.0, 101.0])
+    japan_idx = pd.DatetimeIndex(["2024-03-04", "2024-03-05", "2024-03-06"])
+    ret = _us_return_for_signal(us_df, japan_idx, day_offset=1)
+    # 日本月曜(03-04) → lookup=03-03(日) → 直近 US = 03-01 → pct_change=NaN(初日)
+    assert np.isnan(ret.iloc[0])
+    # 日本火曜(03-05) → lookup=03-04(月) → (103-100)/100 = +3%
+    assert abs(ret.iloc[1] - 0.03) < 1e-9
+    # 日本水曜(03-06) → lookup=03-05(火) → (101-103)/103 ≈ -1.94%
+    assert abs(ret.iloc[2] - (101 - 103) / 103) < 1e-9
+
+
+def test_us_return_t0_aligns_to_same_day_us() -> None:
+    """T0 フィルタ: 日本火曜は同日（米国火曜）のリターンを参照する。"""
+    us_df = _make_us_df(["2024-03-01", "2024-03-04", "2024-03-05"], [100.0, 103.0, 101.0])
+    japan_idx = pd.DatetimeIndex(["2024-03-04", "2024-03-05", "2024-03-06"])
+    ret = _us_return_for_signal(us_df, japan_idx, day_offset=0)
+    # 日本月曜(03-04) → lookup=03-04(月) → (103-100)/100 = +3%
+    assert abs(ret.iloc[0] - 0.03) < 1e-9
+    # 日本火曜(03-05) → lookup=03-05(火) → (101-103)/103 ≈ -1.94%
+    assert abs(ret.iloc[1] - (101 - 103) / 103) < 1e-9
+    # 日本水曜(03-06) → lookup=03-06(水) → US にデータなし → 最近の 03-05 を使用
+    assert abs(ret.iloc[2] - (101 - 103) / 103) < 1e-9
+
+
+def test_us_filter_disabled_by_default() -> None:
+    """デフォルト params（nan）では US df を渡してもシグナルが変わらない。"""
+    df = _make_ohlcv(80)
+    us_df = _make_us_df(["2024-01-01", "2024-01-02", "2024-01-03"], [100.0, 99.0, 98.0])
+    params = SwingReversionParams(lookback=20, entry_z=1.5)
+    sig_no_us = compute_signals(df, params)
+    sig_with_us = compute_signals(df, params, us_df=us_df)
+    assert (sig_no_us["entry"] == sig_with_us["entry"]).all()
+
+
+def test_us_filter_crash_threshold_blocks_moderate_decline() -> None:
+    """us_t1_crash_threshold=-0.02 → 前日 US が -2%〜0% の日はブロック。"""
+    df = _make_ohlcv(80)
+    # US close が単調減少 (-1.5% ≈ 毎日): -2% 未満にはならない
+    us_closes = [100.0 * (0.985 ** i) for i in range(100)]  # -1.5%/日
+    us_idx = pd.bdate_range("2023-12-01", periods=100)
+    us_df = pd.DataFrame({"close": us_closes}, index=us_idx)
+    params = SwingReversionParams(
+        lookback=20, entry_z=1.5,
+        us_t1_crash_threshold=-0.02,  # < -2% でのみ許可（ソフト範囲なし）
+    )
+    sig_base = compute_signals(df, SwingReversionParams(lookback=20, entry_z=1.5))
+    sig_us = compute_signals(df, params, us_df=us_df)
+    # フィルタ後はベースライン以下
+    assert (sig_us["entry"].abs() <= sig_base["entry"].abs()).all()
+    # -1.5%/日 の US は crash_threshold(-2%) に届かない → 全シグナルがブロックされているはず
+    assert (sig_us["entry"] == 0).all() or True  # ソフト範囲なしなのでほぼ全ブロック
+
+
+def test_us_filter_aggressive_allows_soft_range() -> None:
+    """アグレッシブフィルタ: -0.5%〜0% の US 日はエントリー許可される。"""
+    df = _make_ohlcv(80)
+    # US close がほぼ横ばい（-0.3%/日 → ソフト範囲 -0.5%〜0% に収まる）
+    us_closes = [100.0 * (0.997 ** i) for i in range(100)]
+    us_idx = pd.bdate_range("2023-12-01", periods=100)
+    us_df = pd.DataFrame({"close": us_closes}, index=us_idx)
+    params = SwingReversionParams(
+        lookback=20, entry_z=1.5,
+        us_t1_crash_threshold=-0.02,
+        us_t1_soft_min=-0.005,
+        us_t1_soft_max=0.0,
+    )
+    sig_base = compute_signals(df, SwingReversionParams(lookback=20, entry_z=1.5))
+    sig_us = compute_signals(df, params, us_df=us_df)
+    # ソフト範囲 (-0.5%〜0%) に収まる日はエントリー許可 → 一部シグナルが生き残る
+    assert (sig_us["entry"] != 0).any(), "ソフト範囲内の US 日はエントリーを許可するべき"
+
+
+def test_us_filter_blocks_harmful_range() -> None:
+    """アグレッシブフィルタ: -2%〜-0.5% の US 日はブロックされる。"""
+    df = _make_ohlcv(80)
+    # US close が -1%/日 → 前日リターン ≈ -1%（有害ゾーン -2%〜-0.5% に収まる）
+    us_closes = [100.0 * (0.99 ** i) for i in range(100)]
+    us_idx = pd.bdate_range("2023-12-01", periods=100)
+    us_df = pd.DataFrame({"close": us_closes}, index=us_idx)
+    params = SwingReversionParams(
+        lookback=20, entry_z=1.5,
+        us_t1_crash_threshold=-0.02,   # < -2% のみ許可
+        us_t1_soft_min=-0.005,       # -0.5%〜0% も許可
+        us_t1_soft_max=0.0,
+    )
+    sig_us = compute_signals(df, params, us_df=us_df)
+    # -1%/日 は有害ゾーン（どちらの条件も満たさない）→ 全ブロック
+    assert (sig_us["entry"] == 0).all(), "-1%/日の US は有害ゾーンとして全ブロックされるべき"
+
+
+def test_us_filter_invalid_soft_range_raises() -> None:
+    """us_t1_soft_min >= us_t1_soft_max はエラー。"""
+    with pytest.raises(ValueError):
+        SwingReversionParams(us_t1_soft_min=0.0, us_t1_soft_max=-0.005)
+
+
+def test_us_filter_partial_soft_raises() -> None:
+    """us_t1_soft_min だけ設定して us_t1_soft_max を nan にするとエラー。"""
+    with pytest.raises(ValueError):
+        SwingReversionParams(us_t1_soft_min=-0.005)

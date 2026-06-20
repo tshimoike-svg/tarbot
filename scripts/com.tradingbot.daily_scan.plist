@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+Phase 1 日次シグナルスキャン — macOS LaunchAgent
+
+インストール手順:
+  1. パスを実際の環境に合わせる（USER を実際のユーザー名に変更）
+     sed -i '' 's|/Users/t.shimoike|/Users/YOUR_USER|g' com.tradingbot.daily_scan.plist
+
+  2. LaunchAgents にコピーしてロード:
+     cp scripts/com.tradingbot.daily_scan.plist ~/Library/LaunchAgents/
+     launchctl load ~/Library/LaunchAgents/com.tradingbot.daily_scan.plist
+
+  3. 動作確認（即時実行）:
+     launchctl start com.tradingbot.daily_scan
+
+  4. ログ確認:
+     tail -f /tmp/tradingbot_daily_scan.log
+
+  5. 停止・削除:
+     launchctl unload ~/Library/LaunchAgents/com.tradingbot.daily_scan.plist
+
+実行タイミング: 平日 6:00 AM (JST) — 週末はスクリプト側でスキップ
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tradingbot.daily_scan</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/t.shimoike/.local/bin/uv</string>
+        <string>run</string>
+        <string>--project</string>
+        <string>/Users/t.shimoike/AI/BOT</string>
+        <string>python</string>
+        <string>/Users/t.shimoike/AI/BOT/scripts/daily_scan.py</string>
+        <string>--all-configs</string>
+    </array>
+
+    <!-- 平日 6:00 AM (ローカル時刻 = JST) に実行。週末はスクリプト内でスキップ -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer><key>Weekday</key><integer>1</integer></dict>
+        <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer><key>Weekday</key><integer>2</integer></dict>
+        <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer><key>Weekday</key><integer>3</integer></dict>
+        <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer><key>Weekday</key><integer>4</integer></dict>
+        <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer><key>Weekday</key><integer>5</integer></dict>
+    </array>
+
+    <!-- 起動時にスリープから復帰していたら missed な実行を補填 -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/t.shimoike/AI/BOT</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/t.shimoike/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <!-- .env ファイルから読むため個別キーは不要 -->
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/tradingbot_daily_scan.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/tradingbot_daily_scan.log</string>
+</dict>
+</plist>

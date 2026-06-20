@@ -103,11 +103,13 @@ def run_strategy(
     max_drawdown_threshold: float = 0.15,
     market_df: pd.DataFrame | None = None,
     rev_params: object | None = None,
+    us_df: pd.DataFrame | None = None,
 ) -> BacktestResult:
     """1戦略を全銘柄で回し、コスト控除後で評価・ゲート判定する。
 
     market_df: 市場レジームフィルタ用の指数 OHLCV（swing_reversion のみ有効）。
-    rev_params: SwingReversionParams の上書き（--regime 使用時にレジームフィルタ付きパラメータを渡す）。
+    rev_params: SwingReversionParams の上書き（フィルタ付きパラメータを渡す）。
+    us_df: 前日米国株リターンフィルタ用の S&P500 DataFrame（swing_reversion のみ有効）。
     """
     if strategy not in STRATEGIES:
         raise ValueError(f"未知の戦略: {strategy}（{list(STRATEGIES)}）")
@@ -117,6 +119,8 @@ def run_strategy(
         generate_kwargs["market_df"] = market_df
     if rev_params is not None and strategy == "swing_reversion":
         generate_kwargs["params"] = rev_params
+    if us_df is not None and strategy == "swing_reversion":
+        generate_kwargs["us_df"] = us_df
     trades = _collect_trades(
         symbols, load_bars, generate,
         generate_kwargs=generate_kwargs if generate_kwargs else None,
@@ -202,6 +206,7 @@ def compare_strategies(
     max_drawdown_threshold: float = 0.15,
     market_df: pd.DataFrame | None = None,
     rev_params: object | None = None,
+    us_df: pd.DataFrame | None = None,
 ) -> dict[str, BacktestResult]:
     """両戦略を同条件で回して比較結果を返す。"""
     cached = _memoize_loader(load_bars)
@@ -216,6 +221,7 @@ def compare_strategies(
             max_drawdown_threshold=max_drawdown_threshold,
             market_df=market_df,
             rev_params=rev_params,
+            us_df=us_df,
         )
         for name in STRATEGIES
     }
@@ -345,6 +351,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="レンジ判定の閾値（±X% 以内 → レンジ）")
     parser.add_argument("--regime-invert", action="store_true",
                         help="レジームフィルタを反転（トレンド期のみエントリー）")
+    parser.add_argument("--us-filter", action="store_true",
+                        help="前日米国株リターンフィルタを有効化（アグレッシブ設定）")
+    parser.add_argument("--us-crash", type=float, default=-0.02,
+                        help="US クラッシュ閾値: 前日 S&P500 < この値でエントリー許可（既定 -0.02 = -2%%）")
+    parser.add_argument("--us-soft-min", type=float, default=-0.005,
+                        help="US ソフト許可範囲の下限（既定 -0.005 = -0.5%%）")
+    parser.add_argument("--us-soft-max", type=float, default=0.0,
+                        help="US ソフト許可範囲の上限（既定 0.0 = 0%%）")
     args = parser.parse_args(argv)
 
     if args.symbols:
@@ -368,6 +382,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # 市場レジームフィルタ用データ取得
         market_df: pd.DataFrame | None = None
         rev_params: object | None = None
+        us_df: pd.DataFrame | None = None
         if args.regime:
             from config.settings import SwingReversionParams as _RevP
             logger.info("レジームフィルタ用データを取得中（%s）...", args.regime_symbol)
@@ -388,11 +403,43 @@ def main(argv: Sequence[str] | None = None) -> int:
                     regime_filter_invert=args.regime_invert,
                 )
 
+        # 前日米国株リターンフィルタ用データ取得
+        if args.us_filter:
+            from config.settings import SwingReversionParams as _RevP
+            from data.us_loader import load_spx
+
+            logger.info("S&P500 データを取得中（アグレッシブ US フィルタ用）...")
+            us_df = load_spx(args.from_, args.to)
+            if us_df.empty:
+                logger.warning("S&P500 データが空。US フィルタなしで実行します")
+                us_df = None
+            else:
+                logger.info(
+                    "US フィルタ有効: クラッシュ<%.1f%%, ソフト[%.1f%%,%.1f%%)",
+                    args.us_crash * 100, args.us_soft_min * 100, args.us_soft_max * 100,
+                )
+                # rev_params が未設定の場合はベスト設定（lb30/z2.5/rsi<30/long-only）を使う
+                base = rev_params if rev_params is not None else _RevP(
+                    lookback=30, entry_z=2.5, atr_stop_mult=2.5, max_holding_days=14,
+                    allow_long=True, allow_short=False,
+                    rsi_entry_max=30.0,
+                )
+                from dataclasses import replace as _replace
+                rev_params = _replace(
+                    base,
+                    us_t1_crash_threshold=args.us_crash,
+                    us_t1_soft_min=args.us_soft_min,
+                    us_t1_soft_max=args.us_soft_max,
+                    us_t0_crash_threshold=args.us_crash,
+                    us_t0_soft_min=args.us_soft_min,
+                    us_t0_soft_max=args.us_soft_max,
+                ) if isinstance(base, _RevP) else base
+
         if args.compare:
             results = compare_strategies(
                 symbols, load_bars, cost_model=cost_model,
                 n_splits=args.n_splits, min_trades=args.min_trades,
-                market_df=market_df, rev_params=rev_params,
+                market_df=market_df, rev_params=rev_params, us_df=us_df,
             )
             for res in results.values():
                 print(format_result(res))
@@ -406,7 +453,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             res = run_strategy(
                 symbols, load_bars, strategy=args.strategy, cost_model=cost_model,
                 n_splits=args.n_splits, min_trades=args.min_trades,
-                market_df=market_df, rev_params=rev_params,
+                market_df=market_df, rev_params=rev_params, us_df=us_df,
             )
             print(format_result(res))
     except Exception as exc:  # noqa: BLE001 - CLI 最外殻で握って案内
