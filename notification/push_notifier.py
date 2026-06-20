@@ -49,26 +49,29 @@ def send(title: str, body: str, *, priority: str = "default") -> bool:
 
 # ── ntfy.sh ──────────────────────────────────────────────────────────────────────
 
+_NTFY_PRIORITY = {"default": 3, "high": 4, "max": 5, "low": 2, "min": 1}
+
+
 def _send_ntfy(title: str, body: str, *, priority: str = "default") -> bool:
     topic = os.getenv("NTFY_TOPIC")
     if not topic:
         return False
     try:
         resp = requests.post(
-            f"{_NTFY_BASE}/{topic}",
-            data=body.encode("utf-8"),
-            headers={
-                "Title": title,
-                "Priority": priority,
-                "Tags": "chart_increasing",
-                "Content-Type": "text/plain; charset=utf-8",
+            _NTFY_BASE,
+            json={
+                "topic": topic,
+                "title": title,
+                "message": body,
+                "priority": _NTFY_PRIORITY.get(priority, 3),
+                "tags": ["chart_increasing"],
             },
             timeout=10,
         )
         if resp.status_code == 200:
             logger.info("ntfy 通知送信成功 (topic=%s)", topic)
             return True
-        logger.warning("ntfy 通知失敗 status=%d", resp.status_code)
+        logger.warning("ntfy 通知失敗 status=%d: %s", resp.status_code, resp.text[:100])
         return False
     except Exception as exc:
         logger.warning("ntfy 通知エラー: %s", exc)
