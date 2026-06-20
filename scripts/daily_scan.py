@@ -79,8 +79,8 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(description="Phase 1 日次シグナルスキャン")
     parser.add_argument(
-        "--config", choices=list(PHASE1_CONFIGS), default="config_iv",
-        help="追跡するパラメータ設定（既定: config_iv = 推奨）",
+        "--config", choices=list(PHASE1_CONFIGS), default="config_v",
+        help="追跡するパラメータ設定（既定: config_v = ⑤推奨メイン）",
     )
     parser.add_argument(
         "--all-configs", action="store_true",
@@ -105,8 +105,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     today = date.today()
-    # 週末はスキップ（Saturday=5, Sunday=6）
-    if today.weekday() >= 5:
+    # 週末はスキップ（Saturday=5, Sunday=6）—— --dry の場合は強制続行可
+    if today.weekday() >= 5 and not args.dry:
         logger.info("週末のためスキャンをスキップ (%s)", today)
         return 0
 
@@ -167,10 +167,45 @@ def main(argv: list[str] | None = None) -> int:
         if not args.dry:
             send_signal_alert(signal_date, {k: v for k, v in all_new.items()})
 
-        # 7. 出力
+        # 7. 月次 Professional プラン維持チェック（15日・25日）
+        _check_monthly_plan_alert(store, today, dry=args.dry)
+
+        # 8. 出力
         _print_report(all_new, store, signal_date, today)
 
     return 0
+
+
+# ── 月次プラン維持チェック ────────────────────────────────────────────────────────
+
+def _check_monthly_plan_alert(store: SignalStore, today: date, *, dry: bool) -> None:
+    """15日・25日に当月シグナルゼロなら Professionalプラン維持の警告を送る。
+
+    kabuステーション Professional プランは月1回以上の取引維持が条件。
+    US クラッシュが来ない月はシグナルが出ない可能性があるため手動取引を促す。
+    """
+    if today.day not in (15, 25):
+        return
+    ym = today.strftime("%Y-%m")
+    n = store.signals_in_month(ym)
+    if n > 0:
+        logger.info("月次チェック: %s に %d 件のシグナルあり → プラン維持OK", ym, n)
+        return
+
+    msg = (
+        f"今月（{ym}）はまだシグナルがありません。\n"
+        "US 市場が穏やかな月はシグナルが出ない場合があります。\n"
+        "kabuステーション Professional プランの月次取引要件（月1回以上）のため、\n"
+        "手動での最小限の取引（現物少額など）を検討してください。"
+    )
+    logger.warning("月次チェック: %s シグナルゼロ — Professionalプラン維持要注意", ym)
+    if not dry:
+        from notification.push_notifier import send  # noqa: PLC0415
+        send(
+            title=f"⚠️ {ym} シグナルなし — プラン維持確認",
+            body=msg,
+            priority="high",
+        )
 
 
 # ── シグナル検出 ────────────────────────────────────────────────────────────────

@@ -237,7 +237,7 @@ def test_us_filter_aggressive_allows_soft_range() -> None:
 
 
 def test_us_filter_blocks_harmful_range() -> None:
-    """アグレッシブフィルタ: -2%〜-0.5% の US 日はブロックされる。"""
+    """アグレッシブフィルタ: -2%〜-0.5% の US 日はロングエントリーをブロックする。"""
     df = _make_ohlcv(80)
     # US close が -1%/日 → 前日リターン ≈ -1%（有害ゾーン -2%〜-0.5% に収まる）
     us_closes = [100.0 * (0.99 ** i) for i in range(100)]
@@ -245,13 +245,14 @@ def test_us_filter_blocks_harmful_range() -> None:
     us_df = pd.DataFrame({"close": us_closes}, index=us_idx)
     params = SwingReversionParams(
         lookback=20, entry_z=1.5,
+        allow_long=True, allow_short=False,  # ロングのみでテスト
         us_t1_crash_threshold=-0.02,   # < -2% のみ許可
-        us_t1_soft_min=-0.005,       # -0.5%〜0% も許可
+        us_t1_soft_min=-0.005,         # -0.5%〜0% も許可
         us_t1_soft_max=0.0,
     )
     sig_us = compute_signals(df, params, us_df=us_df)
-    # -1%/日 は有害ゾーン（どちらの条件も満たさない）→ 全ブロック
-    assert (sig_us["entry"] == 0).all(), "-1%/日の US は有害ゾーンとして全ブロックされるべき"
+    # -1%/日 は有害ゾーン（どちらの条件も満たさない）→ ロングは全ブロック
+    assert (sig_us["entry"] <= 0).all(), "-1%/日の US は有害ゾーンとしてロングをブロックするべき"
 
 
 def test_us_filter_invalid_soft_range_raises() -> None:
@@ -264,3 +265,115 @@ def test_us_filter_partial_soft_raises() -> None:
     """us_t1_soft_min だけ設定して us_t1_soft_max を nan にするとエラー。"""
     with pytest.raises(ValueError):
         SwingReversionParams(us_t1_soft_min=-0.005)
+
+
+# --- ショート専用 US フィルタ -------------------------------------------------------
+
+def _make_ohlcv_short(n: int = 80) -> pd.DataFrame:
+    """単調上昇→反転の日足ダミー（ショート平均回帰エントリーが発生しやすい）。"""
+    idx = pd.bdate_range("2024-01-02", periods=n)
+    closes = [100.0 + i * 0.8 for i in range(n // 2)] + [
+        132.0 - i * 0.5 for i in range(n - n // 2)
+    ]
+    return pd.DataFrame(
+        {
+            "open":  [c + 0.1 for c in closes],
+            "high":  [c + 1.0 for c in closes],
+            "low":   [c - 1.0 for c in closes],
+            "close": closes,
+        },
+        index=idx,
+        dtype="float64",
+    )
+
+
+def test_short_us_filter_blocks_weak_t1() -> None:
+    """T-1 US が弱い日（< strength_min）はショートをブロックする。"""
+    df = _make_ohlcv_short()
+    # US が毎日 -1% → T-1 リターンはすべて -1% → strength_min=0 を満たさない
+    us_closes = [100.0 * (0.99 ** i) for i in range(100)]
+    us_idx = pd.bdate_range("2023-12-01", periods=100)
+    us_df = pd.DataFrame({"close": us_closes}, index=us_idx)
+    params = SwingReversionParams(
+        lookback=20, entry_z=1.5,
+        allow_long=False, allow_short=True,
+        rsi_entry_min=0.0,
+        us_t1_short_strength_min=0.0,  # T-1 >= 0% でのみショート許可
+    )
+    sig = compute_signals(df, params, us_df=us_df)
+    # T-1 が -1%/日 → strength_min=0 を満たさない → ショートゼロ
+    assert (sig["entry"] >= 0).all(), "T-1 弱い US 日はショートをブロックするべき"
+
+
+def test_short_us_filter_allows_strong_t1() -> None:
+    """T-1 US が強い日（>= strength_min）はショートを通す。"""
+    df = _make_ohlcv_short()
+    # US が毎日 +2% → T-1 リターンはすべて +2% → strength_min=0.005 を満たす
+    us_closes = [100.0 * (1.02 ** i) for i in range(100)]
+    us_idx = pd.bdate_range("2023-12-01", periods=100)
+    us_df = pd.DataFrame({"close": us_closes}, index=us_idx)
+    params = SwingReversionParams(
+        lookback=20, entry_z=1.5,
+        allow_long=False, allow_short=True,
+        rsi_entry_min=0.0,
+        us_t1_short_strength_min=0.005,  # T-1 >= +0.5% でのみショート許可
+    )
+    sig_no_filter = compute_signals(
+        df,
+        SwingReversionParams(lookback=20, entry_z=1.5, allow_long=False, allow_short=True),
+    )
+    sig_filtered = compute_signals(df, params, us_df=us_df)
+    # T-1 +2% は strength_min=0.5% を超える → ショートが生き残る
+    assert (sig_filtered["entry"] != 0).any() or (sig_no_filter["entry"] == 0).all()
+
+
+def test_short_us_filter_t0_weakness_blocks_strong_day() -> None:
+    """T0 US が強い日（> weakness_max）はショートをブロックする。"""
+    df = _make_ohlcv_short()
+    # US が毎日 +1.5% → T0 リターンはすべて +1.5% → weakness_max=0 を超える
+    us_closes = [100.0 * (1.015 ** i) for i in range(100)]
+    us_idx = pd.bdate_range("2023-12-01", periods=100)
+    us_df = pd.DataFrame({"close": us_closes}, index=us_idx)
+    params = SwingReversionParams(
+        lookback=20, entry_z=1.5,
+        allow_long=False, allow_short=True,
+        rsi_entry_min=0.0,
+        us_t0_short_weakness_max=0.0,  # T0 <= 0% でのみショート許可
+    )
+    sig = compute_signals(df, params, us_df=us_df)
+    assert (sig["entry"] >= 0).all(), "T0 US 強い日はショートをブロックするべき"
+
+
+def test_short_us_filter_independent_from_long_filter() -> None:
+    """ショート用 US フィルタはロング用フィルタと独立して動作する。"""
+    df = _make_ohlcv(120)
+    # US が毎日 -1% → ロング用クラッシュ閾値(-2%)を超えず、strength_min(+0%)も満たさない
+    us_closes = [100.0 * (0.99 ** i) for i in range(150)]
+    us_idx = pd.bdate_range("2023-11-01", periods=150)
+    us_df = pd.DataFrame({"close": us_closes}, index=us_idx)
+
+    # ロングフィルタ: -0.5%〜0% のソフト範囲 → -1%/日 はブロック
+    # ショートフィルタ: strength_min=0% → -1%/日 はブロック（両方ブロック）
+    params_both = SwingReversionParams(
+        lookback=20, entry_z=1.5,
+        us_t1_crash_threshold=-0.02,
+        us_t1_soft_min=-0.005, us_t1_soft_max=0.0,
+        us_t1_short_strength_min=0.0,
+    )
+    sig_both = compute_signals(df, params_both, us_df=us_df)
+    # 両方ブロックされるのでエントリーゼロのはず
+    assert (sig_both["entry"] == 0).all()
+
+
+def test_short_us_filter_default_disabled() -> None:
+    """デフォルト params では short US フィルタは無効（ショートシグナルは変わらない）。"""
+    df = _make_ohlcv_short()
+    us_closes = [100.0 * (1.01 ** i) for i in range(100)]
+    us_idx = pd.bdate_range("2023-12-01", periods=100)
+    us_df = pd.DataFrame({"close": us_closes}, index=us_idx)
+    params = SwingReversionParams(
+        lookback=20, entry_z=1.5, allow_long=False, allow_short=True,
+    )
+    sig_no_us  = compute_signals(df, params)
+    sig_with_us = compute_signals(df, params, us_df=us_df)
+    assert (sig_no_us["entry"] == sig_with_us["entry"]).all()

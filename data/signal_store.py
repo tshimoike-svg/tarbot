@@ -129,6 +129,15 @@ class SignalStore:
         cur = self._conn.execute("SELECT * FROM forward_signals ORDER BY id")
         return pd.DataFrame([dict(r) for r in cur.fetchall()])
 
+    def signals_in_month(self, year_month: str) -> int:
+        """YYYY-MM の月内シグナル件数（open / closed 合算）。"""
+        cur = self._conn.execute(
+            "SELECT COUNT(*) FROM forward_signals WHERE signal_date LIKE ?",
+            (f"{year_month}%",),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
     def summary(self) -> str:
         """オープン/クローズ件数と期待値を1行サマリで返す。"""
         df = self.get_all()

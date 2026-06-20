@@ -151,15 +151,30 @@ def compute_signals(
         month_ok = ~pd.DatetimeIndex(df.index).month.isin(params.season_avoid_months)
         entry = entry.where(month_ok, other=0)
 
-    # 米国株リターンフィルタ（T-1 前日 AND T0 当日早朝 の 2 層、両方有効なら AND）
+    # 米国株リターンフィルタ（ロング用と ショート用を方向別に独立して適用）
     if us_df is not None and not us_df.empty:
         japan_idx = pd.DatetimeIndex(df.index)
-        combined_allow = pd.Series(True, index=df.index)  # 全日許可から絞り込む
 
-        for day_offset, crash_attr, smin_attr, smax_attr, rec_attr in (
-            (1, "us_t1_crash_threshold", "us_t1_soft_min", "us_t1_soft_max", "us_t1_recovery_min"),
-            (0, "us_t0_crash_threshold", "us_t0_soft_min", "us_t0_soft_max", "us_t0_recovery_min"),
+        # US リターンを必要なオフセット分だけ事前計算（重複取得を避ける）
+        _need_t1 = any(not math.isnan(getattr(params, a)) for a in (
+            "us_t1_crash_threshold", "us_t1_soft_min", "us_t1_recovery_min",
+            "us_t1_short_strength_min",
+        ))
+        _need_t0 = any(not math.isnan(getattr(params, a)) for a in (
+            "us_t0_crash_threshold", "us_t0_soft_min", "us_t0_recovery_min",
+            "us_t0_short_weakness_max",
+        ))
+        us_t1 = _us_return_for_signal(us_df, japan_idx, day_offset=1) if _need_t1 else None
+        us_t0 = _us_return_for_signal(us_df, japan_idx, day_offset=0) if _need_t0 else None
+
+        # ---- ロング用フィルタ（crash / soft / recovery の OR 条件） ----
+        long_us_allow = pd.Series(True, index=df.index)
+        for us_ret_s, crash_attr, smin_attr, smax_attr, rec_attr in (
+            (us_t1, "us_t1_crash_threshold", "us_t1_soft_min", "us_t1_soft_max", "us_t1_recovery_min"),
+            (us_t0, "us_t0_crash_threshold", "us_t0_soft_min", "us_t0_soft_max", "us_t0_recovery_min"),
         ):
+            if us_ret_s is None:
+                continue
             _crash = getattr(params, crash_attr)
             _smin  = getattr(params, smin_attr)
             _rec   = getattr(params, rec_attr)
@@ -167,21 +182,32 @@ def compute_signals(
             _has_soft     = not math.isnan(_smin)
             _has_recovery = not math.isnan(_rec)
             if not _has_crash and not _has_soft and not _has_recovery:
-                continue  # このオフセットのフィルタは無効 → スキップ
-            us_ret = _us_return_for_signal(us_df, japan_idx, day_offset=day_offset)
+                continue
             layer_allow = pd.Series(False, index=df.index)
             if _has_crash:
-                layer_allow = layer_allow | (us_ret < _crash)
+                layer_allow = layer_allow | (us_ret_s < _crash)
             if _has_soft:
                 _smax = getattr(params, smax_attr)
-                layer_allow = layer_allow | ((us_ret >= _smin) & (us_ret < _smax))
+                layer_allow = layer_allow | ((us_ret_s >= _smin) & (us_ret_s < _smax))
             if _has_recovery:
-                layer_allow = layer_allow | (us_ret >= _rec)
-            # US データ欠損日（祝日等）は NaN → その日は許可（ブロックしない）
-            layer_allow = layer_allow.fillna(True)
-            combined_allow = combined_allow & layer_allow
+                layer_allow = layer_allow | (us_ret_s >= _rec)
+            long_us_allow = long_us_allow & layer_allow.fillna(True)
 
-        entry = entry.where(combined_allow.values, other=0)
+        # ---- ショート用フィルタ（T-1 強さ AND T0 弱さ/平坦） ----
+        short_us_allow = pd.Series(True, index=df.index)
+        _t1_str  = params.us_t1_short_strength_min
+        _t0_weak = params.us_t0_short_weakness_max
+        if not math.isnan(_t1_str) and us_t1 is not None:
+            short_us_allow = short_us_allow & (us_t1 >= _t1_str).fillna(True)
+        if not math.isnan(_t0_weak) and us_t0 is not None:
+            short_us_allow = short_us_allow & (us_t0 <= _t0_weak).fillna(True)
+
+        # 方向別にフィルタを適用して再合成
+        long_ok  = (entry == 1)  & long_us_allow.values
+        short_ok = (entry == -1) & short_us_allow.values
+        entry = pd.Series(0, index=df.index, dtype="int64")
+        entry = entry.mask(long_ok,  1)
+        entry = entry.mask(short_ok, -1)
 
     # 市場レジームフィルタ
     if market_df is not None and not market_df.empty and params.enable_regime_filter:

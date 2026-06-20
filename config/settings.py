@@ -105,6 +105,16 @@ class SwingReversionParams:
     us_t0_soft_min: float = float("nan")           # T0 US ret [soft_min, soft_max) でもエントリー許可
     us_t0_soft_max: float = float("nan")           # (nan=無効)
     us_t0_recovery_min: float = float("nan")       # T0 US ret >= この値でもエントリー許可（反発確認）
+    # ショート専用 US フィルタ（ロング用の crash/soft/recovery とは別・独立して適用）
+    #
+    # 設計思想: ショートの平均回帰は「US 追い風で上昇 → US 追い風が消えた翌日に落ちる」
+    # T-1 が強い（US が上昇）= 日本株が US 追い風で上昇→過熱。ショート候補の起点。
+    # T0 が弱い/平坦（US が上昇しない）= 追い風消滅→日本株が自重で平均回帰する日。
+    #
+    # ロング用フィルタが設定されている場合、ロング側は従来の crash/soft/recovery を使い、
+    # ショート側はこれらの short_* パラメータを使う（互いに独立）。
+    us_t1_short_strength_min: float = float("nan")  # T-1 US ret >= この値でショートエントリー許可 (nan=無効)
+    us_t0_short_weakness_max: float = float("nan")  # T0 US ret <= この値でショートエントリー許可 (nan=無効)
 
     def __post_init__(self) -> None:
         if self.lookback < 2:
