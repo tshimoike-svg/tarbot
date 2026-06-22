@@ -2,9 +2,13 @@ name: Phase 1 日次シグナルスキャン
 
 # 平日 6:00 AM JST (= UTC 前日 21:00) に自動実行
 # 手動実行: GitHub → Actions → Run workflow でも起動可能
+#
+# 注意: cron の曜日は UTC 基準。JST 月〜金（6:00）に走らせたいので
+#       UTC では日〜木（= 0-4）を指定する。'1-5' にすると JST 月曜が
+#       発火せず、JST 土曜が発火してスクリプト側で週末スキップされる。
 on:
   schedule:
-    - cron: '0 21 * * 1-5'
+    - cron: '0 21 * * 0-4'   # UTC 日〜木 21:00 = JST 月〜金 6:00
   workflow_dispatch:
 
 permissions:
