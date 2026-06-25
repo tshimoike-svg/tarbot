@@ -23,8 +23,12 @@ jobs:
     # 初回（コールド）は J-Quants 180 銘柄を 13 秒間隔＋429リトライで取得するため
     # 90 分では足りずタイムアウト → キャッシュ未保存 → 毎回コールドの悪循環に陥っていた。
     # 一度完走してキャッシュ（data/db/daily_scan_cache）が温まれば差分取得で数十秒に収まる。
-    # そのため初回完走を確実にするだけの余裕を持たせる。
-    timeout-minutes: 350
+    #
+    # タイムアウトはスキャン「ステップ」側に置く（下記 345 分）。ジョブ単位で
+    # タイムアウトすると job が cancel され、if: always() の通知ステップまで
+    # skip されてしまう（cancel ≠ failure）。ステップ単位なら "失敗" 扱いになり
+    # 後続の通知ステップが走る。ここはハードな上限のバックストップに留める。
+    timeout-minutes: 355
 
     steps:
       - name: リポジトリをチェックアウト
@@ -58,6 +62,9 @@ jobs:
             us-spx-${{ runner.os }}-
 
       - name: シグナルスキャン実行
+        # ステップ単位のタイムアウト。超過するとこのステップが "失敗" になり、
+        # ジョブ cancel と違って後続の通知ステップ（if: always()）が走る。
+        timeout-minutes: 345
         env:
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
@@ -75,4 +82,38 @@ jobs:
             git push
           else
             echo "forward_signals.sqlite が存在しないためコミットをスキップ（週末 or シグナルなし）"
+          fi
+
+      - name: 実行結果をプッシュ通知（成否どちらも）
+        # 成功・失敗・ステップタイムアウトのいずれでも必ず1通送る（無音を防ぐ死活監視）。
+        # シグナル本体の通知はスクリプト側（send_signal_alert）が別途送る。
+        # curl のみ・Python 非依存なのでスキャンが落ちても確実に飛ぶ。
+        # 注意: ジョブが cancel された場合（手動キャンセル等）は always でも skip される。
+        if: always()
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$JOB_STATUS" = "success" ]; then
+            TITLE="daily_scan OK"; PRIO="default"; TAGS="white_check_mark"
+          else
+            TITLE="daily_scan FAILED ($JOB_STATUS)"; PRIO="high"; TAGS="warning"
+          fi
+          MSG="run #$RUN_NUMBER  status=$JOB_STATUS
+          $RUN_URL"
+          # ntfy（ASCII タイトルなのでヘッダAPIでエンコード問題なし）
+          if [ -n "$NTFY_TOPIC" ]; then
+            curl -s -H "Title: $TITLE" -H "Priority: $PRIO" -H "Tags: $TAGS" \
+              -d "$MSG" "https://ntfy.sh/$NTFY_TOPIC" || true
+          fi
+          # Telegram
+          if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+            curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+              --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
+              --data-urlencode "text=$TITLE
+          $MSG" || true
           fi
