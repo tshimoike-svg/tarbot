@@ -20,15 +20,12 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    # 初回（コールド）は J-Quants 180 銘柄を 13 秒間隔＋429リトライで取得するため
-    # 90 分では足りずタイムアウト → キャッシュ未保存 → 毎回コールドの悪循環に陥っていた。
-    # 一度完走してキャッシュ（data/db/daily_scan_cache）が温まれば差分取得で数十秒に収まる。
-    #
-    # タイムアウトはスキャン「ステップ」側に置く（下記 345 分）。ジョブ単位で
+    # 既定ソースは Yahoo（180 銘柄でも約1分）。コールドでもこの値で十分なバックストップ。
+    # タイムアウトはスキャン「ステップ」側に置く（下記 60 分）。ジョブ単位で
     # タイムアウトすると job が cancel され、if: always() の通知ステップまで
     # skip されてしまう（cancel ≠ failure）。ステップ単位なら "失敗" 扱いになり
     # 後続の通知ステップが走る。ここはハードな上限のバックストップに留める。
-    timeout-minutes: 355
+    timeout-minutes: 70
 
     steps:
       - name: リポジトリをチェックアウト
@@ -44,14 +41,15 @@ jobs:
       - name: 依存パッケージをインストール
         run: uv sync
 
-      - name: J-Quants 日足キャッシュを復元
+      - name: 日足キャッシュを復元
         uses: actions/cache@v4
         with:
-          path: data/db/daily_scan_cache
+          # 既定ソースは Yahoo（当日終値・0日ラグ）。J-Quants 無料は3ヶ月遅延のため不採用。
+          path: data/db/yahoo_scan_cache
           # run_id ベースのキーで毎回新規保存、前回のキャッシュから差分更新
-          key: jquants-bars-${{ runner.os }}-${{ github.run_id }}
+          key: yahoo-bars-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
-            jquants-bars-${{ runner.os }}-
+            yahoo-bars-${{ runner.os }}-
 
       - name: S&P500 キャッシュを復元
         uses: actions/cache@v4
@@ -64,7 +62,7 @@ jobs:
       - name: シグナルスキャン実行
         # ステップ単位のタイムアウト。超過するとこのステップが "失敗" になり、
         # ジョブ cancel と違って後続の通知ステップ（if: always()）が走る。
-        timeout-minutes: 345
+        timeout-minutes: 60
         env:
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}

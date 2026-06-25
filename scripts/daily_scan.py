@@ -43,6 +43,7 @@ from config.costs import get_cost_params
 from config.settings import SwingReversionParams
 from config.symbols import SYMBOLS
 from data.daily_loader import build_daily_loader
+from data.yahoo_loader import build_yahoo_loader
 from data.signal_store import ForwardSignal, SignalStore
 from data.us_loader import load_spx_fresh
 from notification.push_notifier import send_close_alert, send_signal_alert
@@ -92,12 +93,16 @@ def main(argv: list[str] | None = None) -> int:
         help="シグナル DB パス",
     )
     parser.add_argument(
-        "--cache-dir", default=str(_ROOT / "data/db/daily_scan_cache"),
-        help="J-Quants 日足キャッシュ dir",
+        "--source", choices=["yahoo", "jquants"], default="yahoo",
+        help="日足ソース（既定: yahoo = 当日終値0日ラグ。jquants は無料だと3ヶ月遅延）",
+    )
+    parser.add_argument(
+        "--cache-dir", default=None,
+        help="日足キャッシュ dir（未指定なら source ごとの既定）",
     )
     parser.add_argument(
         "--min-interval", type=float, default=13.0,
-        help="J-Quants API レート制限（Free=13.0, Light=1.0）",
+        help="J-Quants API レート制限（Free=13.0, Light=1.0）。yahoo では未使用",
     )
     parser.add_argument(
         "--dry", action="store_true",
@@ -134,10 +139,19 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("スキャン対象: %d 銘柄", len(all_symbols))
 
     # 3. 日足ローダー（差分更新キャッシュ）
-    load_bars = build_daily_loader(
-        from_date=from_date, to_date=to_date,
-        cache_dir=args.cache_dir, min_interval=args.min_interval,
-    )
+    if args.source == "yahoo":
+        cache_dir = args.cache_dir or str(_ROOT / "data/db/yahoo_scan_cache")
+        logger.info("日足ソース: Yahoo Finance（当日終値・分割調整）")
+        load_bars = build_yahoo_loader(
+            from_date=from_date, to_date=to_date, cache_dir=cache_dir,
+        )
+    else:
+        cache_dir = args.cache_dir or str(_ROOT / "data/db/daily_scan_cache")
+        logger.info("日足ソース: J-Quants（無料は3ヶ月遅延）")
+        load_bars = build_daily_loader(
+            from_date=from_date, to_date=to_date,
+            cache_dir=cache_dir, min_interval=args.min_interval,
+        )
 
     cost_model = CostModel(get_cost_params("mid"))
 
