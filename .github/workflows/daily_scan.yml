@@ -20,7 +20,11 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 90   # J-Quants 全銘柄初回取得（5 req/min × 180 銘柄 = 約 40 分）
+    # 初回（コールド）は J-Quants 180 銘柄を 13 秒間隔＋429リトライで取得するため
+    # 90 分では足りずタイムアウト → キャッシュ未保存 → 毎回コールドの悪循環に陥っていた。
+    # 一度完走してキャッシュ（data/db/daily_scan_cache）が温まれば差分取得で数十秒に収まる。
+    # そのため初回完走を確実にするだけの余裕を持たせる。
+    timeout-minutes: 350
 
     steps:
       - name: リポジトリをチェックアウト
