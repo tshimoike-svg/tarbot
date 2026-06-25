@@ -103,14 +103,14 @@ _PRIORITY: dict[str, int] = {
 }
 
 
-def _find_cache(symbol: str) -> Path | None:
+def _find_cache(symbol: str, cache_dir: Path = _CACHE_DIR) -> Path | None:
     """銘柄コードに対応するキャッシュファイルを探す（期間は問わない）。"""
-    candidates = sorted(_CACHE_DIR.glob(f"{symbol}_*.pkl"), reverse=True)
+    candidates = sorted(cache_dir.glob(f"{symbol}_*.pkl"), reverse=True)
     return candidates[0] if candidates else None
 
 
-def _load_cached(symbol: str) -> pd.DataFrame:
-    pkl = _find_cache(symbol)
+def _load_cached(symbol: str, cache_dir: Path = _CACHE_DIR) -> pd.DataFrame:
+    pkl = _find_cache(symbol, cache_dir)
     if pkl is None:
         return pd.DataFrame()
     with pkl.open("rb") as f:
@@ -130,7 +130,17 @@ def main(argv: list[str] | None = None) -> int:
         "--expand", action="store_true",
         help="symbols_300.py を追加して拡張ユニバース（420銘柄）で実行",
     )
+    parser.add_argument(
+        "--cache-dir", default=str(_CACHE_DIR),
+        help="日足キャッシュ dir（既定: bars_cache = J-Quants 2年）",
+    )
+    parser.add_argument(
+        "--out", default=str(_OUT_CSV),
+        help="トレード CSV 出力先",
+    )
     args = parser.parse_args(argv)
+    cache_dir = Path(args.cache_dir)
+    out_csv = Path(args.out)
 
     selected = {f"config_{k}": CONFIGS[f"config_{k}"] for k in args.configs}
 
@@ -151,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     seen: set[str] = set()
     all_symbols = []
     for s in raw:
-        if s not in seen and _find_cache(s) is not None:
+        if s not in seen and _find_cache(s, cache_dir) is not None:
             seen.add(s)
             all_symbols.append(s)
     logger.info("対象銘柄: %d 件%s", len(all_symbols), "（拡張420）" if args.expand else "")
@@ -188,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
         n_trades = 0
 
         for symbol in all_symbols:
-            df = _load_cached(symbol)
+            df = _load_cached(symbol, cache_dir)
             if df.empty or len(df) < 50:
                 continue
 
@@ -225,8 +235,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     out = pd.DataFrame(rows)
-    out.to_csv(_OUT_CSV, index=False)
-    logger.info("保存完了: %s  (%d 行)", _OUT_CSV, len(out))
+    out.to_csv(out_csv, index=False)
+    logger.info("保存完了: %s  (%d 行)", out_csv, len(out))
 
     print("\n=== サマリ ===")
     for cfg, g in out.groupby("config_name"):

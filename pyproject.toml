@@ -12,6 +12,7 @@ dependencies = [
     "requests>=2.32",      # J-Quants REST 取得用
     "python-dotenv>=1.0",  # .env からの認証情報読み込み
     "yfinance>=1.4.1",     # S&P500・日本株日足（ドライランの既定ソース）
+    "pyarrow>=24.0.0",     # us_loader/bars_cache の parquet・pyarrow backed dtype 読込に必須
 ]
 
 [project.optional-dependencies]
