@@ -91,8 +91,8 @@ def build_yahoo_loader(
     from_ts = pd.Timestamp(from_date)
     # yfinance の end は排他。to_date を含めるため翌日を渡す。
     fetch_end = (to_ts + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-    # stale 判定: キャッシュ最終日が to_date の 1 日前未満なら再取得（週末は許容）。
-    staleness_threshold = to_ts - pd.Timedelta(days=1)
+    # stale 判定: キャッシュ最終日が to_date 未満なら再取得（週末は許容）。
+    staleness_threshold = to_ts
 
     def load(symbol: str) -> pd.DataFrame:
         pkl = cache_path / f"{symbol}.pkl"
