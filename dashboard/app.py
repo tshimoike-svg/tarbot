@@ -105,6 +105,48 @@ def _equity_from_lots(closed_df: pd.DataFrame, initial: float = _INITIAL_CAPITAL
     return np.array(result)
 
 
+def _simulate_fills(df: pd.DataFrame, cap_limit: float) -> pd.DataFrame:
+    """時系列で買付枠（cap_limit）制約を適用し、各建玉が実約定したか(filled)を判定。
+
+    ルール（ユーザー確定）:
+      - 同日エントリーは 1ロット必要額の安い順に詰める（枠を使い切る）
+      - 残枠に収まらない建玉は見送り（filled=False）
+      - クローズで枠が空いても、過去に見送った建玉は買い直さない（追わない）
+
+    dedup 済み（銘柄×エントリー日で1行）を前提。investment 列を付与して返す。
+    """
+    d = df.copy().reset_index(drop=True)
+    d["_entry"]     = pd.to_datetime(d["entry_date"])
+    d["_exit"]      = pd.to_datetime(d["exit_date"]) if "exit_date" in d.columns else pd.NaT
+    d["investment"] = d["entry_price"].apply(lambda p: _calc_lots(float(p))[1])
+    d["filled"]     = False
+
+    exit_days = [x for x in d["_exit"].tolist() if pd.notna(x)]
+    all_days  = sorted(set(d["_entry"].tolist() + exit_days))
+
+    open_pos: list[dict] = []  # {"exit": Timestamp|NaT, "invest": float}
+    used = 0.0
+    for day in all_days:
+        # クローズを先に処理して枠を戻す
+        still = []
+        for p in open_pos:
+            if pd.notna(p["exit"]) and p["exit"] <= day:
+                used -= p["invest"]
+            else:
+                still.append(p)
+        open_pos = still
+        # その日のエントリーを 1ロット額の安い順に枠へ詰める
+        todays = d[d["_entry"] == day].sort_values("investment")
+        for idx in todays.index:
+            inv = float(d.at[idx, "investment"])
+            if used + inv <= cap_limit + 1e-6:
+                used += inv
+                open_pos.append({"exit": d.at[idx, "_exit"], "invest": inv})
+                d.at[idx, "filled"] = True
+
+    return d.drop(columns=["_entry", "_exit"])
+
+
 def _portfolio_simulation(
     trades_df: pd.DataFrame,
     position_ratio: float,
@@ -269,12 +311,19 @@ if is_bt:
 else:
     _df = df.copy()
 
-closed_raw = _df[_df["status"] == "closed"].sort_values("exit_date").copy()
-open_raw   = _df[_df["status"] == "open"].copy()
-
-# ドライラン: 同銘柄・同日の複数コンフィグ行を集約
-closed = _dedup_by_stock(closed_raw) if not is_bt else closed_raw
-open_  = _dedup_by_stock(open_raw)   if not is_bt else open_raw
+if is_bt:
+    closed      = _df[_df["status"] == "closed"].sort_values("exit_date").copy()
+    open_       = _df[_df["status"] == "open"].copy()
+    skipped_open = pd.DataFrame()
+else:
+    # 同銘柄・同日の複数コンフィグを1建玉に集約 → 時系列で買付枠制約を適用
+    all_dedup = _dedup_by_stock(_df)
+    all_dedup = _simulate_fills(all_dedup, _INITIAL_CAPITAL * _LEVERAGE_LIMIT)
+    filled    = all_dedup[all_dedup["filled"]]
+    closed    = filled[filled["status"] == "closed"].sort_values("exit_date").copy()
+    open_     = filled[filled["status"] == "open"].copy()
+    # 買付枠オーバーで見送った、現在オープン相当の建玉
+    skipped_open = all_dedup[(~all_dedup["filled"]) & (all_dedup["status"] == "open")].copy()
 
 # ── 複利計算 ────────────────────────────────────────────────────────────────────
 
@@ -478,41 +527,65 @@ st.divider()
 tab_open, tab_closed, tab_chart = st.tabs(["オープン", "クローズ履歴", "エクイティ曲線"])
 
 with tab_open:
-    if open_.empty:
-        st.info("現在オープンポジションはありません。")
-    elif not is_bt:
-        cap_limit   = _INITIAL_CAPITAL * _LEVERAGE_LIMIT
-        lots_data   = [_calc_lots(float(r["entry_price"])) for _, r in open_.iterrows()]
-        total_exp   = sum(r[1] for r in lots_data)
-        remaining   = cap_limit - total_exp
-
-        d = open_[["symbol", "config_name", "signal_date", "entry_date",
-                   "entry_price", "stop_price", "target_price", "max_exit_date"]].copy()
-        d["ロット"]      = [r[0] for r in lots_data]
-        d["実投資額"]    = [int(r[1]) for r in lots_data]
-        d["目標利益(¥)"] = (
-            d["ロット"] * _LOT_SIZE * (d["target_price"] - d["entry_price"])
-        ).round(0).astype(int)
-        d = d.rename(columns={
-            "symbol": "銘柄", "config_name": "設定", "signal_date": "シグナル日",
-            "entry_date": "エントリー日", "entry_price": "単価",
-            "stop_price": "ストップ", "target_price": "目標", "max_exit_date": "期限",
-        })
-        st.caption(
-            f"買付総額: ¥{total_exp:,.0f}　残枠: ¥{remaining:,.0f}　"
-            f"（上限 ¥{cap_limit:,.0f} = 資本×{_LEVERAGE_LIMIT}倍）"
-        )
-        st.dataframe(
-            d[["銘柄", "設定", "シグナル日", "エントリー日", "単価", "ストップ", "目標", "期限",
-               "ロット", "実投資額", "目標利益(¥)"]],
-            use_container_width=True, hide_index=True,
-        )
+    if is_bt:
+        if open_.empty:
+            st.info("現在オープンポジションはありません。")
+        else:
+            st.dataframe(
+                open_[["symbol", "config_name", "entry_date", "entry_price",
+                       "stop_price", "target_price", "max_exit_date"]],
+                use_container_width=True, hide_index=True,
+            )
     else:
-        st.dataframe(
-            open_[["symbol", "config_name", "entry_date", "entry_price",
-                   "stop_price", "target_price", "max_exit_date"]],
-            use_container_width=True, hide_index=True,
-        )
+        cap_limit = _INITIAL_CAPITAL * _LEVERAGE_LIMIT
+        if open_.empty and skipped_open.empty:
+            st.info("現在オープンポジションはありません。")
+        else:
+            if not open_.empty:
+                lots_data = [_calc_lots(float(r["entry_price"])) for _, r in open_.iterrows()]
+                total_exp = sum(r[1] for r in lots_data)
+                remaining = cap_limit - total_exp
+
+                d = open_[["symbol", "config_name", "signal_date", "entry_date",
+                           "entry_price", "stop_price", "target_price", "max_exit_date"]].copy()
+                d["ロット"]      = [r[0] for r in lots_data]
+                d["実投資額"]    = [int(r[1]) for r in lots_data]
+                d["目標利益(¥)"] = (
+                    d["ロット"] * _LOT_SIZE * (d["target_price"] - d["entry_price"])
+                ).round(0).astype(int)
+                d = d.rename(columns={
+                    "symbol": "銘柄", "config_name": "設定", "signal_date": "シグナル日",
+                    "entry_date": "エントリー日", "entry_price": "単価",
+                    "stop_price": "ストップ", "target_price": "目標", "max_exit_date": "期限",
+                })
+                st.caption(
+                    f"買付総額: ¥{total_exp:,.0f}　残枠: ¥{remaining:,.0f}　"
+                    f"（上限 ¥{cap_limit:,.0f} = 資本×{_LEVERAGE_LIMIT}倍）"
+                )
+                st.dataframe(
+                    d[["銘柄", "設定", "シグナル日", "エントリー日", "単価", "ストップ", "目標", "期限",
+                       "ロット", "実投資額", "目標利益(¥)"]],
+                    use_container_width=True, hide_index=True,
+                )
+            else:
+                st.info("枠内で約定したオープンポジションはありません。")
+
+            if not skipped_open.empty:
+                st.warning(
+                    f"⚠️ 買付枠（上限 ¥{cap_limit:,.0f}）が埋まり、以下 {len(skipped_open)} 銘柄は"
+                    "見送り（このまま追わない）"
+                )
+                sd = skipped_open[["symbol", "config_name", "entry_date",
+                                   "entry_price", "target_price"]].copy()
+                sd["1ロット必要額"] = [int(_calc_lots(float(p))[1]) for p in sd["entry_price"]]
+                sd = sd.rename(columns={
+                    "symbol": "銘柄", "config_name": "設定", "entry_date": "エントリー日",
+                    "entry_price": "単価", "target_price": "目標",
+                })
+                st.dataframe(
+                    sd[["銘柄", "設定", "エントリー日", "単価", "目標", "1ロット必要額"]],
+                    use_container_width=True, hide_index=True,
+                )
 
 with tab_closed:
     if closed.empty:
