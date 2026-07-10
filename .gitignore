@@ -60,6 +60,8 @@ data/db/*
 !tests/**/*.csv
 # フォワードシグナルDB は GitHub Actions で共有するため追跡する（*.sqlite より後ろに書いて優先）
 !data/db/forward_signals.sqlite
+# バックテスト比較用CSV はダッシュボード（Streamlit Cloud）表示に必要なため追跡する
+!data/db/bt_trades.csv
 
 # ===== バックテスト成果物・ログ =====
 backtest/results/

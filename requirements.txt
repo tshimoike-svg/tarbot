@@ -1,0 +1,6 @@
+# Streamlit Community Cloud 用（dashboard/app.py の実行に必要な最小依存）
+# base 依存は pyproject.toml を参照。ダッシュボードは J-Quants/yfinance を呼ばないため含めない。
+streamlit>=1.40
+plotly>=5.24
+pandas>=2.2
+numpy>=1.26
