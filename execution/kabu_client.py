@@ -11,6 +11,9 @@ API（http://localhost:18080 または 18081 配下）は応答しない（CLAUD
   2. レスポンスの Token を以後のリクエストの X-API-KEY ヘッダに使う
   3. トークンは kabuステーション再起動・PC再起動・有効期限切れで失効する
 
+APIパスワードは本番用・検証用で別々に設定する仕様（kabuステーション システム設定
+「APIタブ」）。.env は KABU_API_PASSWORD_PROD / KABU_API_PASSWORD_DEMO を使う。
+
 このモジュールは発注を一切行わない（絶対原則6）。残高・板情報の読み取りのみ。
 発注が必要になった場合は risk_manager.py を通す order_engine.py 側で別途実装する。
 """
@@ -80,7 +83,10 @@ class KabuClient:
     ) -> None:
         if load_env:
             load_dotenv()
-        self._api_password = api_password or os.getenv("KABU_API_PASSWORD")
+        env_var = "KABU_API_PASSWORD_PROD" if env == "prod" else "KABU_API_PASSWORD_DEMO"
+        self._api_password = (
+            api_password or os.getenv(env_var) or os.getenv("KABU_API_PASSWORD")
+        )
         self._env: KabuEnv = env
         self._base_url = (base_url or f"http://localhost:{_PORT_BY_ENV[env]}/kabusapi").rstrip("/")
         self._session = session or requests.Session()
@@ -96,9 +102,11 @@ class KabuClient:
 
     def _require_api_password(self) -> str:
         if not self._api_password:
+            env_var = "KABU_API_PASSWORD_PROD" if self._env == "prod" else "KABU_API_PASSWORD_DEMO"
             raise KabuAuthError(
-                "KABU_API_PASSWORD が未設定です。kabuステーションの「API」設定画面で登録した"
-                "パスワードを .env の KABU_API_PASSWORD に設定してください。"
+                f"{env_var} が未設定です。kabuステーションのシステム設定「APIタブ」で登録した"
+                f"{'本番用' if self._env == 'prod' else '検証用'}パスワードを .env の {env_var} "
+                "に設定してください（本番/検証で別パスワード）。"
             )
         return self._api_password
 

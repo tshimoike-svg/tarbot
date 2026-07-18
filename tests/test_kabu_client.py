@@ -49,6 +49,23 @@ def test_prod_env_uses_port_18080() -> None:
     assert "18080" in client._base_url  # noqa: SLF001
 
 
+# --- 本番/検証で別パスワードを解決する ------------------------------------------------
+def test_resolves_env_specific_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KABU_API_PASSWORD_PROD", "PROD_PW")
+    monkeypatch.setenv("KABU_API_PASSWORD_DEMO", "DEMO_PW")
+    prod = KabuClient(session=FakeSession([]), env="prod", load_env=False)  # type: ignore[arg-type]
+    demo = KabuClient(session=FakeSession([]), env="demo", load_env=False)  # type: ignore[arg-type]
+    assert prod._api_password == "PROD_PW"  # noqa: SLF001
+    assert demo._api_password == "DEMO_PW"  # noqa: SLF001
+
+
+def test_falls_back_to_shared_password_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KABU_API_PASSWORD_DEMO", raising=False)
+    monkeypatch.setenv("KABU_API_PASSWORD", "SHARED_PW")
+    client = KabuClient(session=FakeSession([]), env="demo", load_env=False)  # type: ignore[arg-type]
+    assert client._api_password == "SHARED_PW"  # noqa: SLF001
+
+
 # --- 認証 --------------------------------------------------------------------------
 def test_get_token_sends_api_password_and_caches() -> None:
     session = FakeSession([FakeResponse(200, {"ResultCode": 0, "Token": "TOK123"})])
