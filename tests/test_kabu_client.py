@@ -10,12 +10,14 @@ from execution.kabu_client import KabuAPIError, KabuAuthError, KabuClient, KabuE
 
 
 class FakeResponse:
-    def __init__(self, status_code: int, json_data: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self, status_code: int, json_data: dict[str, Any] | list[Any] | None = None
+    ) -> None:
         self.status_code = status_code
-        self._json = json_data or {}
+        self._json = json_data if json_data is not None else {}
         self.text = str(json_data)
 
-    def json(self) -> dict[str, Any]:
+    def json(self) -> dict[str, Any] | list[Any]:
         return self._json
 
 
@@ -139,7 +141,7 @@ def test_get_positions_returns_list() -> None:
     session = FakeSession(
         [
             FakeResponse(200, {"ResultCode": 0, "Token": "TOK123"}),
-            FakeResponse(200, [{"ExecutionID": "E1", "Symbol": "1301"}]),  # type: ignore[list-item]
+            FakeResponse(200, [{"ExecutionID": "E1", "Symbol": "1301"}]),
         ]
     )
     positions = _client(session).get_positions()
@@ -166,7 +168,7 @@ def test_get_orders_returns_list() -> None:
     session = FakeSession(
         [
             FakeResponse(200, {"ResultCode": 0, "Token": "TOK123"}),
-            FakeResponse(200, [{"ID": "ORD1", "State": 5, "OrderQty": 100, "CumQty": 100}]),  # type: ignore[list-item]
+            FakeResponse(200, [{"ID": "ORD1", "State": 5, "OrderQty": 100, "CumQty": 100}]),
         ]
     )
     orders = _client(session).get_orders()
