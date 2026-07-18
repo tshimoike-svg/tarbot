@@ -34,18 +34,28 @@ st.set_page_config(page_title="Phase 1 監視", page_icon="📈", layout="wide")
 # ── ヘルパー ────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=300)
-def _load_live() -> pd.DataFrame:
-    if not _DB.exists():
-        return pd.DataFrame()
+def _load_live_cached(_mtime: float) -> pd.DataFrame:
     with SignalStore(_DB) as s:
         return s.get_all()
 
 
+def _load_live() -> pd.DataFrame:
+    # ファイルの mtime をキャッシュキーに含める（内容が変わってもTTL内は同一関数呼び出し
+    # のため st.cache_data が古い結果を返し続ける問題を避ける）。
+    if not _DB.exists():
+        return pd.DataFrame()
+    return _load_live_cached(_DB.stat().st_mtime)
+
+
 @st.cache_data(ttl=3600)
+def _load_bt_cached(_mtime: float) -> pd.DataFrame:
+    return pd.read_csv(_BT_CSV)
+
+
 def _load_bt() -> pd.DataFrame:
     if not _BT_CSV.exists():
         return pd.DataFrame()
-    return pd.read_csv(_BT_CSV)
+    return _load_bt_cached(_BT_CSV.stat().st_mtime)
 
 
 def _calc_lots(entry_price: float) -> tuple[int, float]:
