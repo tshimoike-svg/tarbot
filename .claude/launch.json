@@ -3,7 +3,7 @@
   "configurations": [
     {
       "name": "dashboard",
-      "runtimeExecutable": "uv",
+      "runtimeExecutable": "C:\\Users\\81907\\.local\\bin\\uv.exe",
       "runtimeArgs": ["run", "streamlit", "run", "dashboard/app.py", "--server.headless", "true"],
       "port": 8501
     }

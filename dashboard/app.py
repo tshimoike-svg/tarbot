@@ -249,6 +249,12 @@ CONFIG_LABELS = {
     "config_v":    "⑤ rsi<40（推奨メイン）",
     "config_t2c":  "補助C（lb=30, z≥2.0, RSI<40, US フィルタあり）",
     "main+aux":    "⑤メイン + 補助C（lb=30 空きスロット埋め）",
+    "mom_lb20_nofilter": "momentum lb20（レジームフィルタ前）",
+    "mom_lb20_filtered": "momentum lb20（レジームフィルタ後）",
+    "mom_lb40_nofilter": "momentum lb40（レジームフィルタ前）",
+    "mom_lb40_filtered": "momentum lb40（レジームフィルタ後）",
+    "mom_lb60_nofilter": "momentum lb60（レジームフィルタ前）",
+    "mom_lb60_filtered": "momentum lb60（レジームフィルタ後）",
     "all":         "全設定合算",
 }
 
