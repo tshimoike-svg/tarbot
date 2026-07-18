@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from config.settings import RiskParams
-from execution.order_engine import OrderEngine
+from execution.order_engine import HoldIdLookupError, OrderEngine, find_hold_id_for_exit
 from strategy.risk_manager import OrderRequest, RiskManager
 
 
@@ -209,3 +209,62 @@ def test_account_type_is_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
     engine.submit(_entry())
 
     assert client.calls[0]["AccountType"] == 4
+
+
+# --- find_hold_id_for_exit ----------------------------------------------------------
+class FakePositionsClient:
+    def __init__(self, positions: list[dict[str, Any]]) -> None:
+        self._positions = positions
+        self.calls: list[dict[str, Any]] = []
+
+    def get_positions(self, **kw: Any) -> list[dict[str, Any]]:
+        self.calls.append(kw)
+        return self._positions
+
+
+def test_find_hold_id_returns_single_match() -> None:
+    client = FakePositionsClient(
+        [{"ExecutionID": "E1", "Symbol": "1301", "LeavesQty": 100}]
+    )
+    hold_id = find_hold_id_for_exit(client, symbol="1301", exit_side="sell")  # type: ignore[arg-type]
+    assert hold_id == "E1"
+
+
+def test_find_hold_id_queries_opposite_side_of_exit() -> None:
+    client = FakePositionsClient([{"ExecutionID": "E1", "LeavesQty": 100}])
+    find_hold_id_for_exit(client, symbol="1301", exit_side="sell")  # type: ignore[arg-type]
+    # ロング決済(sell)の建玉自体は買い(2)
+    assert client.calls[0]["side"] == "2"
+
+    client2 = FakePositionsClient([{"ExecutionID": "E2", "LeavesQty": 100}])
+    find_hold_id_for_exit(client2, symbol="1301", exit_side="buy")  # type: ignore[arg-type]
+    # ショート決済(buy)の建玉自体は売り(1)
+    assert client2.calls[0]["side"] == "1"
+
+
+def test_find_hold_id_raises_when_no_position() -> None:
+    client = FakePositionsClient([])
+    with pytest.raises(HoldIdLookupError):
+        find_hold_id_for_exit(client, symbol="1301", exit_side="sell")  # type: ignore[arg-type]
+
+
+def test_find_hold_id_raises_when_ambiguous() -> None:
+    client = FakePositionsClient(
+        [
+            {"ExecutionID": "E1", "LeavesQty": 100},
+            {"ExecutionID": "E2", "LeavesQty": 200},
+        ]
+    )
+    with pytest.raises(HoldIdLookupError):
+        find_hold_id_for_exit(client, symbol="1301", exit_side="sell")  # type: ignore[arg-type]
+
+
+def test_find_hold_id_ignores_fully_closed_positions() -> None:
+    client = FakePositionsClient(
+        [
+            {"ExecutionID": "E1", "LeavesQty": 0},  # 既に返済済み
+            {"ExecutionID": "E2", "LeavesQty": 100},
+        ]
+    )
+    hold_id = find_hold_id_for_exit(client, symbol="1301", exit_side="sell")  # type: ignore[arg-type]
+    assert hold_id == "E2"

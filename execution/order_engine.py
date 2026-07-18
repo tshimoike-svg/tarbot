@@ -34,7 +34,7 @@ from execution.fill_monitor import OrderSide
 from execution.kabu_client import KabuClient
 from strategy.risk_manager import OrderRequest, RiskDecision, RiskManager
 
-__all__ = ["OrderSubmission", "OrderEngine"]
+__all__ = ["OrderSubmission", "OrderEngine", "HoldIdLookupError", "find_hold_id_for_exit"]
 
 logger = logging.getLogger(__name__)
 
@@ -160,3 +160,36 @@ class OrderEngine:
         if not req.is_entry:
             payload["ClosePositions"] = [{"HoldID": hold_id, "Qty": req.shares}]
         return payload
+
+
+class HoldIdLookupError(Exception):
+    """決済対象の建玉を一意に特定できなかった（0件・複数件どちらも含む）。"""
+
+
+def find_hold_id_for_exit(client: KabuClient, *, symbol: str, exit_side: OrderSide) -> str:
+    """決済注文の ClosePositions に使う建玉ID（ExecutionID）を GET /positions から探す。
+
+    exit_side は決済注文自体の売買方向（ロング決済=sell/ショート決済=buy）。建玉の
+    向きはその逆なので、`get_positions` には反転した side を渡す。
+
+    残数量（LeavesQty）が0より大きい建玉が複数見つかった場合は、誤った建玉を閉じる
+    リスクを避けるため自動選択せず `HoldIdLookupError` を送出する（呼び出し側が
+    `hold_id` を明示的に指定すること）。
+    """
+    position_side = "1" if exit_side == "buy" else "2"  # 決済sideの逆＝建玉自体の方向
+    positions = client.get_positions(symbol=symbol, product="2", side=position_side)
+    open_positions = [p for p in positions if (p.get("LeavesQty") or 0) > 0]
+
+    if not open_positions:
+        raise HoldIdLookupError(f"symbol={symbol} の決済対象建玉が見つかりません")
+    if len(open_positions) > 1:
+        ids = [p.get("ExecutionID") for p in open_positions]
+        raise HoldIdLookupError(
+            f"symbol={symbol} に複数の建玉が見つかりました（{ids}）。"
+            "hold_id を明示的に指定してください（自動選択は誤った建玉を閉じるリスクがあるため行わない）"
+        )
+
+    execution_id = open_positions[0].get("ExecutionID")
+    if not execution_id:
+        raise HoldIdLookupError(f"symbol={symbol} の建玉に ExecutionID がありません")
+    return str(execution_id)

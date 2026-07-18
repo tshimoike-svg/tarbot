@@ -161,6 +161,33 @@ def test_get_positions_builds_query_string() -> None:
     assert "side=2" in url
 
 
+# --- 注文約定照会（get_orders） ------------------------------------------------------
+def test_get_orders_returns_list() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(200, {"ResultCode": 0, "Token": "TOK123"}),
+            FakeResponse(200, [{"ID": "ORD1", "State": 5, "OrderQty": 100, "CumQty": 100}]),  # type: ignore[list-item]
+        ]
+    )
+    orders = _client(session).get_orders()
+    assert orders == [{"ID": "ORD1", "State": 5, "OrderQty": 100, "CumQty": 100}]
+    assert session.calls[1]["url"].endswith("/orders")
+
+
+def test_get_orders_builds_query_string() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(200, {"ResultCode": 0, "Token": "TOK123"}),
+            FakeResponse(200, []),
+        ]
+    )
+    _client(session).get_orders(order_id="ORD1", symbol="1301", state="5")
+    url = session.calls[1]["url"]
+    assert "id=ORD1" in url
+    assert "symbol=1301" in url
+    assert "state=5" in url
+
+
 # --- 発注（send_order） ------------------------------------------------------------
 def test_send_order_merges_order_password_and_posts(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KABU_ORDER_PASSWORD_DEMO", "ORDER_PW")

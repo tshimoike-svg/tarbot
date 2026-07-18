@@ -228,6 +228,29 @@ class KabuClient:
         """時価・板情報（GET /board/{symbol}@{exchange}）。exchange既定=1（東証）。"""
         return self._http("GET", f"/board/{symbol}@{exchange}")
 
+    def get_orders(
+        self,
+        *,
+        order_id: str | None = None,
+        symbol: str | None = None,
+        state: str | None = None,
+        product: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """注文約定照会（GET /orders）。send_order は受理のみ返すため、実際に約定した
+        かどうかは本メソッドで別途確認する（CumQty/OrderQty や Details[].RecType=8）。
+
+        Args:
+            order_id: send_order の応答 OrderId で絞り込み（省略可）。
+            symbol: 銘柄コードで絞り込み（省略可）。
+            state: "1"〜"5"（状態）で絞り込み（省略可）。
+            product: "0"=すべて/"1"=現物/"2"=信用/"3"=先物/"4"=OP（省略可）。
+        """
+        params = {"id": order_id, "symbol": symbol, "state": state, "product": product}
+        query = urlencode({k: v for k, v in params.items() if v is not None})
+        path = f"/orders?{query}" if query else "/orders"
+        result = self._http("GET", path)
+        return result if isinstance(result, list) else []
+
     # --- 発注（POST /sendorder） -------------------------------------------------------
     def send_order(self, payload: dict[str, Any]) -> dict[str, Any]:
         """注文を送信する（取引パスワードを自動付与してPOST /sendorder）。
