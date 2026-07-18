@@ -46,6 +46,7 @@ from data.daily_loader import build_daily_loader
 from data.yahoo_loader import build_yahoo_loader
 from data.signal_store import ForwardSignal, SignalStore
 from data.us_loader import load_spx_fresh
+from data.jp_index_loader import load_n225_fresh
 from notification.push_notifier import send_close_alert, send_signal_alert
 from strategy.swing_momentum import compute_signals as compute_momentum_signals
 from strategy.swing_reversion import compute_signals
@@ -70,18 +71,31 @@ PHASE1_CONFIGS: dict[str, SwingReversionParams] = {
 # momentum（ブレイクアウト・ロングのみ）。docs/results/oos_eval_2026-06-25.md の
 # 追加検証（scripts/simulate_momentum.py）と同一パラメータ。反転がOOSで劣化する一方、
 # momentumは改善傾向だったため、フォワード母数を増やす目的で追跡対象に加える。
+#
+# 市場レジームフィルタ（enable_regime_filter=True・regime_filter_invert=True）：
+# 2024-04〜2025-05の日経レンジ相場（円キャリー巻き戻し・トランプ関税ショック）で
+# ブレイクアウトのダマシが多発しwalk-forwardが不安定だったため、日経225自体が
+# トレンド相場のときだけエントリーを許可する。regime_ma_window=90・threshold=0.05は
+# グリッドサーチで最良だった組み合わせ（2026-07-18・docs/results/参照）。
+# ただしフィルタ後もPhase0ゲート（DD<15%）は未クリア。フォワード検証で判断を継続する。
 MOMENTUM_CONFIGS: dict[str, SwingMomentumParams] = {
     "mom_lb20": SwingMomentumParams(
         breakout_lookback=20, atr_stop_mult=2.0, max_holding_days=10,
         allow_long=True, allow_short=False,
+        enable_regime_filter=True, regime_ma_window=90, regime_threshold=0.05,
+        regime_filter_invert=True,
     ),
     "mom_lb40": SwingMomentumParams(
         breakout_lookback=40, atr_stop_mult=2.0, max_holding_days=10,
         allow_long=True, allow_short=False,
+        enable_regime_filter=True, regime_ma_window=90, regime_threshold=0.05,
+        regime_filter_invert=True,
     ),
     "mom_lb60": SwingMomentumParams(
         breakout_lookback=60, atr_stop_mult=2.0, max_holding_days=10,
         allow_long=True, allow_short=False,
+        enable_regime_filter=True, regime_ma_window=90, regime_threshold=0.05,
+        regime_filter_invert=True,
     ),
 }
 
@@ -153,6 +167,17 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("S&P500 取得失敗: %s — US フィルタなしで続行", exc)
         us_df = None
 
+    # 1b. 日経225 最新データ（momentum の市場レジームフィルタ用）
+    n225_df: pd.DataFrame | None = None
+    if args.include_momentum:
+        logger.info("日経225 データ確認中...")
+        try:
+            n225_df = load_n225_fresh(lookback_days=_LOOKBACK_DAYS + 100)
+            logger.info("日経225 最終日: %s", n225_df.index[-1].date())
+        except Exception as exc:
+            logger.error("日経225 取得失敗: %s — レジームフィルタなしで続行", exc)
+            n225_df = None
+
     # 2. 全銘柄リスト
     try:
         from config.symbols_cs import SYMBOLS_CS  # noqa: PLC0415
@@ -204,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.include_momentum:
             for config_name, mom_params in MOMENTUM_CONFIGS.items():
                 new_mom_sigs = _detect_new_momentum_signals(
-                    all_symbols, mom_params, load_bars, store,
+                    all_symbols, mom_params, n225_df, load_bars, store,
                     signal_date, today, config_name, args.dry,
                 )
                 all_new[config_name] = new_mom_sigs
@@ -317,6 +342,7 @@ def _detect_new_signals(
 def _detect_new_momentum_signals(
     symbols: list[str],
     params: SwingMomentumParams,
+    market_df: pd.DataFrame | None,
     load_bars,
     store: SignalStore,
     signal_date: str,
@@ -329,6 +355,9 @@ def _detect_new_momentum_signals(
     momentumには固定目標がない（ATR損切り／タイムストップのみで出る）ため、
     target_price は +inf にする。_check_exits の target 到達判定
     （row["close"] >= target_price）が実質無効化され、stop/time_stop だけが働く。
+
+    market_df（日経225）は params.enable_regime_filter=True のときのみ使われる
+    （トレンド相場限定エントリー・2026-07-18 導入）。
     """
     new_signals: list[ForwardSignal] = []
 
@@ -337,7 +366,7 @@ def _detect_new_momentum_signals(
         if df.empty or len(df) < _MIN_BARS:
             continue
 
-        signals = compute_momentum_signals(df, params)
+        signals = compute_momentum_signals(df, params, market_df=market_df)
         if signals.empty:
             continue
 

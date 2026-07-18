@@ -25,6 +25,7 @@ __all__ = [
     "bollinger_bands",
     "rolling_zscore",
     "rsi",
+    "market_regime_mask",
 ]
 
 ATRMethod = Literal["wilder", "sma"]
@@ -195,6 +196,37 @@ def rsi(close: pd.Series, *, length: int = 14) -> pd.Series:
     avg_loss = loss.ewm(alpha=1.0 / length, adjust=False, min_periods=length).mean()
     denom = avg_gain + avg_loss
     return (100.0 * avg_gain / denom.replace(0.0, float("nan"))).rename("rsi")
+
+
+def market_regime_mask(
+    market_df: pd.DataFrame,
+    target_index: pd.DatetimeIndex,
+    *,
+    ma_window: int,
+    threshold: float,
+    invert: bool = False,
+) -> pd.Series:
+    """各日付について市場がエントリー許可レジームか（前日終値基準・ルックアヘッドなし）。
+
+    reversion・momentum 共通の市場レジームフィルタ。shift(1) で前日の終値・MA を
+    参照するため当日のデータを先読みしない。target_index に市場データが無い日
+    （休場の翌日など）は前の値を前向きに埋め（ffill）、データ不足（MA計算前）は
+    エントリー許可（True）とする。
+
+    invert=False: MA(ma_window) ±threshold% 以内の「レンジ相場」のときエントリー許可
+                  （平均回帰向き：個別株の押し目が効きやすい）。
+    invert=True : MA(ma_window) ±threshold% 外の「トレンド相場」のときエントリー許可
+                  （モメンタム向き：ブレイクアウトがダマシになりにくい）。
+    """
+    close = market_df["close"]
+    prev_close = close.shift(1)
+    ma = prev_close.rolling(window=ma_window, min_periods=ma_window // 2).mean()
+    in_range = (prev_close / ma - 1).abs() < threshold
+    mask = (~in_range) if invert else in_range
+    # NaN < threshold は pandas では False（NaN ではない）になるため、fillna は効かない。
+    # データ不足（ma が NaN）の行は invert に関わらず明示的に True にする。
+    mask = mask.where(ma.notna(), other=True)
+    return mask.reindex(target_index, method="ffill").fillna(True)
 
 
 def rolling_zscore(series: pd.Series, *, length: int, ddof: int = 0) -> pd.Series:

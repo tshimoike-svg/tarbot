@@ -19,7 +19,7 @@ import math
 import pandas as pd
 
 from config.settings import DEFAULT_SWING_REVERSION, SwingReversionParams
-from strategy.indicators import atr, rolling_zscore, rsi as compute_rsi
+from strategy.indicators import atr, market_regime_mask, rolling_zscore, rsi as compute_rsi
 from strategy.swing import walk_swing
 from strategy.trade import Trade
 
@@ -34,31 +34,6 @@ def _check(df: pd.DataFrame) -> None:
         raise ValueError(f"必須列が不足: {missing}（必要: {_REQUIRED}）")
     if not df.index.is_monotonic_increasing:
         raise ValueError("df は時刻昇順である必要があります")
-
-
-def _market_regime_mask(
-    market_df: pd.DataFrame,
-    target_index: pd.DatetimeIndex,
-    *,
-    ma_window: int,
-    threshold: float,
-    invert: bool = False,
-) -> pd.Series:
-    """各日付について市場がエントリー許可レジームか（前日終値基準・ルックアヘッドなし）。
-
-    shift(1) で前日の終値・MA を参照するため当日のデータを先読みしない。
-    target_index に市場データが無い日（休場の翌日など）は前の値を前向きに埋め（ffill）、
-    データ不足（MA計算前）はエントリー許可（True）とする。
-
-    invert=False（既定）: MA60 ±threshold% 以内の「レンジ相場」のときエントリー許可。
-    invert=True         : MA60 ±threshold% 外の「トレンド相場」のときエントリー許可。
-    """
-    close = market_df["close"]
-    prev_close = close.shift(1)
-    ma = prev_close.rolling(window=ma_window, min_periods=ma_window // 2).mean()
-    in_range = ((prev_close / ma - 1).abs() < threshold).fillna(True)
-    mask = (~in_range) if invert else in_range
-    return mask.reindex(target_index, method="ffill").fillna(True)
 
 
 def _us_return_for_signal(
@@ -211,7 +186,7 @@ def compute_signals(
 
     # 市場レジームフィルタ
     if market_df is not None and not market_df.empty and params.enable_regime_filter:
-        regime = _market_regime_mask(
+        regime = market_regime_mask(
             market_df, pd.DatetimeIndex(df.index),
             ma_window=params.regime_ma_window,
             threshold=params.regime_threshold,

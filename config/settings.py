@@ -162,6 +162,15 @@ class SwingMomentumParams:
         atr_stop_mult: 損切り幅 = atr_stop_mult × ATR。
         max_holding_days: 最大保有日数（タイムストップ）。
         allow_long / allow_short: 売買方向の許可。
+        enable_regime_filter: 市場レジームフィルタを使うか（既定False＝フィルタなし）。
+            2024-04〜2025-05の日経レンジ相場（円キャリー巻き戻し・トランプ関税ショック）
+            でブレイクアウトのダマシが多発した反省から、市場自体がトレンド相場の
+            ときだけエントリーを許可する（regime_filter_invert=True固定運用を想定）。
+        regime_ma_window: 市場指数の MA 期間。
+        regime_threshold: ±X% 以内をレンジと判定する閾値。
+        regime_filter_invert: True固定を想定（トレンド相場のときのみエントリー許可）。
+            reversion と同じパラメータ名・意味だが、momentumは構造的にトレンド相場向き
+            なので False（レンジのときのみ許可）で使う想定はない。
     """
 
     breakout_lookback: int = 20
@@ -170,6 +179,10 @@ class SwingMomentumParams:
     max_holding_days: int = 10
     allow_long: bool = True
     allow_short: bool = True
+    enable_regime_filter: bool = False
+    regime_ma_window: int = 60
+    regime_threshold: float = 0.03
+    regime_filter_invert: bool = True
 
     def __post_init__(self) -> None:
         if self.breakout_lookback < 2:
@@ -182,6 +195,10 @@ class SwingMomentumParams:
             raise ValueError("max_holding_days は 1 以上")
         if not (self.allow_long or self.allow_short):
             raise ValueError("allow_long / allow_short の少なくとも一方は True")
+        if self.regime_ma_window < 2:
+            raise ValueError("regime_ma_window は 2 以上")
+        if self.regime_threshold <= 0:
+            raise ValueError("regime_threshold は正")
 
 
 DEFAULT_SWING_MOMENTUM = SwingMomentumParams()

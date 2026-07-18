@@ -15,6 +15,7 @@ import pytest
 from strategy.indicators import (
     atr,
     bollinger_bands,
+    market_regime_mask,
     rolling_zscore,
     rsi,
     true_range,
@@ -252,3 +253,63 @@ def test_vwap_is_causal(ohlcv: pd.DataFrame) -> None:
         sub_session = pd.Series(sub.index.normalize(), index=sub.index)
         truncated = vwap(sub["close"], sub["volume"], session=sub_session)
         assert truncated.iloc[t] == pytest.approx(full.iloc[t]), f"VWAP が t={t} で未来依存"
+
+
+# --- market_regime_mask -------------------------------------------------------------
+def _market_df(closes: list[float]) -> pd.DataFrame:
+    idx = pd.date_range("2026-01-01", periods=len(closes), freq="D")
+    return pd.DataFrame({"close": closes}, index=idx)
+
+
+def test_regime_mask_range_market_allows_entry_when_not_inverted() -> None:
+    # 一定値 → MA からの乖離が常に0 → レンジ判定 → invert=False で常に許可
+    market = _market_df([100.0] * 30)
+    target = market.index
+    mask = market_regime_mask(market, target, ma_window=10, threshold=0.03, invert=False)
+    assert bool(mask.iloc[-1])
+
+
+def test_regime_mask_trending_market_blocks_entry_when_not_inverted() -> None:
+    # 一貫して上昇 → 前日終値がMAより大きく乖離 → トレンド判定 → invert=False で不許可
+    closes = [100.0 * (1.02**i) for i in range(30)]  # 複利2%/日の強いトレンド
+    market = _market_df(closes)
+    target = market.index
+    mask = market_regime_mask(market, target, ma_window=10, threshold=0.03, invert=False)
+    assert not bool(mask.iloc[-1])
+
+
+def test_regime_mask_trending_market_allows_entry_when_inverted() -> None:
+    closes = [100.0 * (1.02**i) for i in range(30)]
+    market = _market_df(closes)
+    target = market.index
+    mask = market_regime_mask(market, target, ma_window=10, threshold=0.03, invert=True)
+    assert bool(mask.iloc[-1])
+
+
+def test_regime_mask_warmup_defaults_to_allowed() -> None:
+    # MA計算に必要な本数が無い先頭付近はデータ不足 → 許可（True）にフォールバック
+    market = _market_df([100.0, 101.0, 99.0])
+    target = market.index
+    mask = market_regime_mask(market, target, ma_window=60, threshold=0.03, invert=False)
+    assert mask.iloc[0]
+
+
+def test_regime_mask_no_lookahead() -> None:
+    # 前日終値のみ参照するため、当日の急変が当日のマスクに影響しない
+    closes = [100.0] * 20 + [200.0]  # 最終日だけ急騰
+    market = _market_df(closes)
+    target = market.index
+    full = market_regime_mask(market, target, ma_window=10, threshold=0.03, invert=False)
+    truncated = market_regime_mask(
+        market.iloc[:-1], target[:-1], ma_window=10, threshold=0.03, invert=False
+    )
+    assert full.iloc[-2] == truncated.iloc[-1]
+
+
+def test_regime_mask_ffill_for_missing_dates() -> None:
+    # target_index に無い日は前方埋め（例：市場休場日の翌営業日でも直近の判定を引き継ぐ）
+    market = _market_df([100.0 * (1.02**i) for i in range(30)])
+    target = pd.date_range("2026-01-01", periods=32, freq="D")  # market に無い2日を含む
+    mask = market_regime_mask(market, target, ma_window=10, threshold=0.03, invert=False)
+    assert len(mask) == len(target)
+    assert mask.iloc[-1] == mask.iloc[29]  # 最後の実データ日の値を引き継ぐ
