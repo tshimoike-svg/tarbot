@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Phase 1 ドライラン: 毎朝（平日 7:40 JST）実行の日次シグナルスキャン。
 
+config_v（反転）+ mom_lb60_filtered（momentum）併用ロジック（2026-07-18決定）で
+共有資金プールを運用する。信用3倍・証拠金使用率80%・1銘柄配分20%・1日の新規建て
+上限2件・競合時は1単元必要額が安い方優先（strategy/portfolio_allocator.py）。
+
 実行タイミング:
   7:40 AM JST — US 市場は既に閉場済み（夏時間で US 引け ~5:00 AM JST）。
                   J-Quants に前日（T）の日足が揃っている。東京寄り付き 9:00 前。
@@ -8,11 +12,12 @@
                   （実行時刻の定義は .github/workflows/daily_scan.yml の cron）
 
 処理フロー:
-  1. S&P500 最新データ取得（差分更新）
+  1. S&P500・日経225 最新データ取得（差分更新）
   2. 全銘柄の日足取得（差分更新キャッシュ）
-  3. オープンポジションの出口チェック（前日 OHLC で判定）
-  4. 新規シグナル検出（前日 T の終値ベース）
-  5. サマリ出力
+  3. オープンポジションの出口チェック（前日 OHLC で判定・実現損益を口座に反映）
+  4. config_v・mom_lb60_filtered の新規シグナル検出（前日 T の終値ベース）
+  5. risk_manager・portfolio_allocator で本日の新規建てを決定
+  6. サマリ出力
 
 注意:
   エントリー価格 = T の終値（近似）。実際の T+1 始値はギャップで異なる。
@@ -24,7 +29,6 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from dataclasses import replace as _dc_replace
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -40,69 +44,47 @@ load_dotenv(_ROOT / ".env")
 
 from backtest.cost_model import CostModel
 from config.costs import get_cost_params
-from config.settings import SwingMomentumParams, SwingReversionParams
+from config.settings import COMBO_V_MOM60_RISK, SwingMomentumParams, SwingReversionParams
 from config.symbols import SYMBOLS
 from data.daily_loader import build_daily_loader
-from data.yahoo_loader import build_yahoo_loader
+from data.jp_index_loader import load_n225_fresh
 from data.signal_store import ForwardSignal, SignalStore
 from data.us_loader import load_spx_fresh
-from data.jp_index_loader import load_n225_fresh
+from data.yahoo_loader import build_yahoo_loader
 from notification.push_notifier import send_close_alert, send_signal_alert
+from strategy.portfolio_allocator import Candidate, allocate_daily_entries
+from strategy.risk_manager import RiskManager
 from strategy.swing_momentum import compute_signals as compute_momentum_signals
-from strategy.swing_reversion import compute_signals
+from strategy.swing_reversion import compute_signals as compute_reversion_signals
 
 logger = logging.getLogger(__name__)
 
-# ── Phase 1 設定 ────────────────────────────────────────────────────────────────
-# バックテスト ③④⑤ に対応（④ = Phase 0 PASS: n=310, DD=13.3%, E=+7.37%/trade）
-_BASE = dict(
+# ── 併用運用の設定（2026-07-18決定。詳細: docs/results/combo_v_mom60_decision_2026-07-18.md）
+_CONFIG_NAME = "combo_v_mom60"
+_INITIAL_EQUITY = 1_000_000.0
+_LEVERAGE = 3.0
+_USAGE_RATE = 0.8
+_PER_SYMBOL_SHARE = 0.20
+
+_BASE_REV = dict(
     lookback=20, entry_z=2.0, atr_stop_mult=2.0, max_holding_days=10,
     allow_long=True, allow_short=False,
     us_t1_crash_threshold=-0.02, us_t1_soft_min=-0.005, us_t1_soft_max=0.0,
     us_t0_crash_threshold=-0.02, us_t0_soft_min=-0.005, us_t0_soft_max=0.0,
     us_t0_recovery_min=0.01,
 )
-PHASE1_CONFIGS: dict[str, SwingReversionParams] = {
-    "config_iii": SwingReversionParams(**_BASE, rsi_entry_max=30.0),
-    "config_iv":  SwingReversionParams(**_BASE, rsi_entry_max=35.0),  # 推奨
-    "config_v":   SwingReversionParams(**_BASE, rsi_entry_max=40.0),
-}
-
-# momentum（ブレイクアウト・ロングのみ）。docs/results/oos_eval_2026-06-25.md の
-# 追加検証（scripts/simulate_momentum.py）と同一パラメータ。反転がOOSで劣化する一方、
-# momentumは改善傾向だったため、フォワード母数を増やす目的で追跡対象に加える。
-#
-# 市場レジームフィルタ（enable_regime_filter=True・regime_filter_invert=True）：
-# 2024-04〜2025-05の日経レンジ相場（円キャリー巻き戻し・トランプ関税ショック）で
-# ブレイクアウトのダマシが多発しwalk-forwardが不安定だったため、日経225自体が
-# トレンド相場のときだけエントリーを許可する。regime_ma_window=90・threshold=0.05は
-# グリッドサーチで最良だった組み合わせ（2026-07-18・docs/results/参照）。
-# ただしフィルタ後もPhase0ゲート（DD<15%）は未クリア。フォワード検証で判断を継続する。
-MOMENTUM_CONFIGS: dict[str, SwingMomentumParams] = {
-    "mom_lb20": SwingMomentumParams(
-        breakout_lookback=20, atr_stop_mult=2.0, max_holding_days=10,
-        allow_long=True, allow_short=False,
-        enable_regime_filter=True, regime_ma_window=90, regime_threshold=0.05,
-        regime_filter_invert=True,
-    ),
-    "mom_lb40": SwingMomentumParams(
-        breakout_lookback=40, atr_stop_mult=2.0, max_holding_days=10,
-        allow_long=True, allow_short=False,
-        enable_regime_filter=True, regime_ma_window=90, regime_threshold=0.05,
-        regime_filter_invert=True,
-    ),
-    "mom_lb60": SwingMomentumParams(
-        breakout_lookback=60, atr_stop_mult=2.0, max_holding_days=10,
-        allow_long=True, allow_short=False,
-        enable_regime_filter=True, regime_ma_window=90, regime_threshold=0.05,
-        regime_filter_invert=True,
-    ),
-}
+CONFIG_V = SwingReversionParams(**_BASE_REV, rsi_entry_max=40.0)
+MOM_LB60_FILTERED = SwingMomentumParams(
+    breakout_lookback=60, atr_stop_mult=2.0, max_holding_days=10,
+    allow_long=True, allow_short=False,
+    enable_regime_filter=True, regime_ma_window=90, regime_threshold=0.05,
+    regime_filter_invert=True,
+)
 
 # シグナル計算に十分な日数（lookback + ATR + RSI + 余裕）
-_MIN_BARS = 50
+_MIN_BARS = 70
 # J-Quants 取得窓
-_LOOKBACK_DAYS = 90
+_LOOKBACK_DAYS = 100
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -112,19 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         datefmt="%H:%M:%S",
     )
 
-    parser = argparse.ArgumentParser(description="Phase 1 日次シグナルスキャン")
-    parser.add_argument(
-        "--config", choices=list(PHASE1_CONFIGS), default="config_v",
-        help="追跡するパラメータ設定（既定: config_v = ⑤推奨メイン）",
-    )
-    parser.add_argument(
-        "--all-configs", action="store_true",
-        help="③④⑤ 全設定を同時追跡",
-    )
-    parser.add_argument(
-        "--include-momentum", action="store_true",
-        help="momentum（mom_lb20/40/60・ロングのみ）もフォワード追跡に含める",
-    )
+    parser = argparse.ArgumentParser(description="Phase 1 日次シグナルスキャン（config_v + mom_lb60_filtered併用）")
     parser.add_argument(
         "--db", default=str(_ROOT / "data/db/forward_signals.sqlite"),
         help="シグナル DB パス",
@@ -153,12 +123,10 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("週末のためスキャンをスキップ (%s)", today)
         return 0
 
-    configs_to_run = PHASE1_CONFIGS if args.all_configs else {args.config: PHASE1_CONFIGS[args.config]}
-
     from_date = (today - timedelta(days=_LOOKBACK_DAYS)).isoformat()
     to_date = (today - timedelta(days=1)).isoformat()  # 前日まで（T = 昨日）
 
-    # 1. S&P500 最新データ
+    # 1. S&P500 最新データ（config_v の US フィルタ用）
     logger.info("S&P500 データ確認中...")
     try:
         us_df = load_spx_fresh(lookback_days=_LOOKBACK_DAYS + 30)
@@ -167,16 +135,14 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("S&P500 取得失敗: %s — US フィルタなしで続行", exc)
         us_df = None
 
-    # 1b. 日経225 最新データ（momentum の市場レジームフィルタ用）
-    n225_df: pd.DataFrame | None = None
-    if args.include_momentum:
-        logger.info("日経225 データ確認中...")
-        try:
-            n225_df = load_n225_fresh(lookback_days=_LOOKBACK_DAYS + 100)
-            logger.info("日経225 最終日: %s", n225_df.index[-1].date())
-        except Exception as exc:
-            logger.error("日経225 取得失敗: %s — レジームフィルタなしで続行", exc)
-            n225_df = None
+    # 1b. 日経225 最新データ（mom_lb60_filtered の市場レジームフィルタ用）
+    logger.info("日経225 データ確認中...")
+    try:
+        n225_df = load_n225_fresh(lookback_days=_LOOKBACK_DAYS + 100)
+        logger.info("日経225 最終日: %s", n225_df.index[-1].date())
+    except Exception as exc:
+        logger.error("日経225 取得失敗: %s — レジームフィルタなしで続行", exc)
+        n225_df = None
 
     # 2. 全銘柄リスト
     try:
@@ -190,61 +156,102 @@ def main(argv: list[str] | None = None) -> int:
     if args.source == "yahoo":
         cache_dir = args.cache_dir or str(_ROOT / "data/db/yahoo_scan_cache")
         logger.info("日足ソース: Yahoo Finance（当日終値・分割調整）")
-        load_bars = build_yahoo_loader(
-            from_date=from_date, to_date=to_date, cache_dir=cache_dir,
-        )
+        load_bars = build_yahoo_loader(from_date=from_date, to_date=to_date, cache_dir=cache_dir)
     else:
         cache_dir = args.cache_dir or str(_ROOT / "data/db/daily_scan_cache")
         logger.info("日足ソース: J-Quants（無料は3ヶ月遅延）")
         load_bars = build_daily_loader(
-            from_date=from_date, to_date=to_date,
-            cache_dir=cache_dir, min_interval=args.min_interval,
+            from_date=from_date, to_date=to_date, cache_dir=cache_dir, min_interval=args.min_interval,
         )
 
     cost_model = CostModel(get_cost_params("mid"))
 
     with SignalStore(args.db) as store:
-        # 4. オープンポジションの出口チェック
+        # 4. 現在の資産・オープン建玉を復元
+        current_equity = _reconstruct_equity(store)
+        logger.info("現在の評価額（復元）: %.0f円", current_equity)
+
         open_sigs = store.get_open_signals()
         closed_records: list[dict] = []
         if open_sigs:
             logger.info("オープンシグナル %d 件の出口チェック中...", len(open_sigs))
-            closed_count, closed_records = _check_exits(open_sigs, store, load_bars, cost_model, today, args.dry)
+            closed_count, closed_records, current_equity = _check_exits(
+                open_sigs, store, load_bars, cost_model, today, current_equity, args.dry,
+            )
             if closed_count:
-                logger.info("  → %d 件クローズ", closed_count)
+                logger.info("  → %d 件クローズ  評価額: %.0f円", closed_count, current_equity)
                 if not args.dry:
                     send_close_alert(closed_records)
 
-        # 5. 新規シグナル検出（前日 T のデータ）
-        all_new: dict[str, list[ForwardSignal]] = {}
+        # 5. risk_manager を今日の状態で再構築（オープン建玉を復元）
+        rm = RiskManager(account_equity=current_equity, params=COMBO_V_MOM60_RISK)
+        rm.start_day(today)
+        still_open = store.get_open_signals()
+        for open_row in still_open:
+            notional = float(open_row["shares"] or 0) * float(open_row["entry_price"])
+            if notional > 0:
+                rm._positions[open_row["symbol"]] = notional  # noqa: SLF001 — 状態復元（on_openは日次件数を誤って加算するため使わない）
+
+        # 6. 新規シグナル検出（前日 T のデータ）→ 候補を集めて割り当て
         signal_date = to_date  # T = 昨日
+        candidates_info = _detect_candidates(
+            all_symbols, load_bars, us_df, n225_df, store, signal_date, today,
+        )
 
-        for config_name, params in configs_to_run.items():
-            new_sigs = _detect_new_signals(
-                all_symbols, params, us_df, load_bars, store,
-                signal_date, today, config_name, args.dry,
+        decisions = allocate_daily_entries(
+            [c for c, _info in candidates_info],
+            risk_manager=rm, account_equity=current_equity,
+            leverage=_LEVERAGE, usage_rate=_USAGE_RATE, per_symbol_share=_PER_SYMBOL_SHARE,
+        )
+        info_by_symbol = {c.symbol: info for c, info in candidates_info}
+
+        new_signals: list[ForwardSignal] = []
+        for dec in decisions:
+            if not dec.approved:
+                logger.info("却下: %s reason=%s", dec.candidate.symbol, dec.decision.reason)
+                continue
+            info = info_by_symbol[dec.candidate.symbol]
+            sig = ForwardSignal(
+                symbol=dec.candidate.symbol,
+                signal_date=signal_date,
+                side="long",
+                entry_date=today.isoformat(),
+                entry_price=dec.candidate.entry_price,
+                stop_price=info["stop_price"],
+                target_price=info["target_price"],
+                max_exit_date=(today + timedelta(days=info["max_holding_days"])).isoformat(),
+                config_name=_CONFIG_NAME,
+                shares=dec.sizing.shares,
             )
-            all_new[config_name] = new_sigs
+            if not args.dry:
+                store.insert_signal(sig)
+            new_signals.append(sig)
 
-        if args.include_momentum:
-            for config_name, mom_params in MOMENTUM_CONFIGS.items():
-                new_mom_sigs = _detect_new_momentum_signals(
-                    all_symbols, mom_params, n225_df, load_bars, store,
-                    signal_date, today, config_name, args.dry,
-                )
-                all_new[config_name] = new_mom_sigs
+        # 7. LINE 通知（dry モードはスキップ）
+        if not args.dry and new_signals:
+            send_signal_alert(signal_date, {_CONFIG_NAME: new_signals})
 
-        # 6. LINE 通知（dry モードはスキップ）
-        if not args.dry:
-            send_signal_alert(signal_date, {k: v for k, v in all_new.items()})
-
-        # 7. 月次 Professional プラン維持チェック（15日・25日）
+        # 8. 月次 Professional プラン維持チェック（15日・25日）
         _check_monthly_plan_alert(store, today, dry=args.dry)
 
-        # 8. 出力
-        _print_report(all_new, store, signal_date, today)
+        # 9. 出力
+        _print_report(new_signals, store, signal_date, today, current_equity)
 
     return 0
+
+
+# ── 資産・状態の復元 ────────────────────────────────────────────────────────────────
+
+def _reconstruct_equity(store: SignalStore) -> float:
+    """クローズ済み combo_v_mom60 トレードの実現損益から現在の評価額を復元する。"""
+    df = store.get_all()
+    if df.empty:
+        return _INITIAL_EQUITY
+    closed = df[(df["status"] == "closed") & (df["config_name"] == _CONFIG_NAME)]
+    if closed.empty:
+        return _INITIAL_EQUITY
+    realized = (closed["shares"].fillna(0) * closed["entry_price"] * closed["net_return"].fillna(0)).sum()
+    return _INITIAL_EQUITY + float(realized)
 
 
 # ── 月次プラン維持チェック ────────────────────────────────────────────────────────
@@ -272,135 +279,64 @@ def _check_monthly_plan_alert(store: SignalStore, today: date, *, dry: bool) -> 
     logger.warning("月次チェック: %s シグナルゼロ — Professionalプラン維持要注意", ym)
     if not dry:
         from notification.push_notifier import send  # noqa: PLC0415
-        send(
-            title=f"⚠️ {ym} シグナルなし — プラン維持確認",
-            body=msg,
-            priority="high",
-        )
+        send(title=f"⚠️ {ym} シグナルなし — プラン維持確認", body=msg, priority="high")
 
 
 # ── シグナル検出 ────────────────────────────────────────────────────────────────
 
-def _detect_new_signals(
+def _detect_candidates(
     symbols: list[str],
-    params: SwingReversionParams,
+    load_bars,
     us_df: pd.DataFrame | None,
-    load_bars,
+    n225_df: pd.DataFrame | None,
     store: SignalStore,
     signal_date: str,
     entry_date: date,
-    config_name: str,
-    dry: bool,
-) -> list[ForwardSignal]:
-    """全銘柄をスキャンし、signal_date にシグナルが出た銘柄を返す。"""
-    new_signals: list[ForwardSignal] = []
+) -> list[tuple[Candidate, dict]]:
+    """config_v・mom_lb60_filtered 両方の当日候補を集める（Candidate, 付随情報）。"""
+    out: list[tuple[Candidate, dict]] = []
 
     for symbol in symbols:
         df = load_bars(symbol)
         if df.empty or len(df) < _MIN_BARS:
             continue
 
-        signals = compute_signals(df, params, us_df=us_df)
-        if signals.empty:
-            continue
+        # --- config_v（反転） ---
+        rev = compute_reversion_signals(df, CONFIG_V, us_df=us_df)
+        if not rev.empty and int(rev["entry"].iloc[-1]) == 1:
+            actual_signal_date = rev.index[-1].strftime("%Y-%m-%d")
+            if not store.signal_exists(symbol, actual_signal_date, _CONFIG_NAME):
+                last_row = rev.iloc[-1]
+                last_close = float(df["close"].iloc[-1])
+                last_atr = float(last_row["atr"]) if not pd.isna(last_row["atr"]) else last_close * 0.02
+                out.append((
+                    Candidate(symbol=symbol, side="buy", entry_price=last_close, source="config_v"),
+                    {
+                        "stop_price": last_close - last_atr * CONFIG_V.atr_stop_mult,
+                        "target_price": float(last_row["ma"]),
+                        "max_holding_days": CONFIG_V.max_holding_days,
+                    },
+                ))
+                continue  # 同一銘柄でmomentumも重複検出しない（1銘柄1シグナル/日）
 
-        # 最終バー（= signal_date T）のシグナルを確認
-        last_entry = int(signals["entry"].iloc[-1])
-        if last_entry != 1:  # long only（config は allow_short=False）
-            continue
+        # --- mom_lb60_filtered（momentum） ---
+        mom = compute_momentum_signals(df, MOM_LB60_FILTERED, market_df=n225_df)
+        if not mom.empty and int(mom["entry"].iloc[-1]) == 1:
+            actual_signal_date = mom.index[-1].strftime("%Y-%m-%d")
+            if not store.signal_exists(symbol, actual_signal_date, _CONFIG_NAME):
+                last_row = mom.iloc[-1]
+                last_close = float(df["close"].iloc[-1])
+                last_atr = float(last_row["atr"]) if not pd.isna(last_row["atr"]) else last_close * 0.02
+                out.append((
+                    Candidate(symbol=symbol, side="buy", entry_price=last_close, source="mom_lb60_filtered"),
+                    {
+                        "stop_price": last_close - last_atr * MOM_LB60_FILTERED.atr_stop_mult,
+                        "target_price": float("inf"),
+                        "max_holding_days": MOM_LB60_FILTERED.max_holding_days,
+                    },
+                ))
 
-        actual_signal_date = signals.index[-1].strftime("%Y-%m-%d")
-        if store.signal_exists(symbol, actual_signal_date, config_name):
-            continue
-
-        last_row = signals.iloc[-1]
-        last_close = float(df["close"].iloc[-1])
-        last_atr = float(last_row["atr"]) if not pd.isna(last_row["atr"]) else last_close * 0.02
-        target = float(last_row["ma"])
-        stop = last_close - last_atr * params.atr_stop_mult
-        max_exit = (entry_date + timedelta(days=params.max_holding_days)).isoformat()
-
-        sig = ForwardSignal(
-            symbol=symbol,
-            signal_date=actual_signal_date,
-            side="long",
-            entry_date=entry_date.isoformat(),
-            entry_price=last_close,      # 翌日始値の近似（保守的バイアス）
-            stop_price=stop,
-            target_price=target,
-            max_exit_date=max_exit,
-            config_name=config_name,
-        )
-
-        if not dry:
-            store.insert_signal(sig)
-        new_signals.append(sig)
-
-    return new_signals
-
-
-def _detect_new_momentum_signals(
-    symbols: list[str],
-    params: SwingMomentumParams,
-    market_df: pd.DataFrame | None,
-    load_bars,
-    store: SignalStore,
-    signal_date: str,
-    entry_date: date,
-    config_name: str,
-    dry: bool,
-) -> list[ForwardSignal]:
-    """全銘柄をスキャンし、signal_date にブレイクアウトが出た銘柄を返す（ロングのみ）。
-
-    momentumには固定目標がない（ATR損切り／タイムストップのみで出る）ため、
-    target_price は +inf にする。_check_exits の target 到達判定
-    （row["close"] >= target_price）が実質無効化され、stop/time_stop だけが働く。
-
-    market_df（日経225）は params.enable_regime_filter=True のときのみ使われる
-    （トレンド相場限定エントリー・2026-07-18 導入）。
-    """
-    new_signals: list[ForwardSignal] = []
-
-    for symbol in symbols:
-        df = load_bars(symbol)
-        if df.empty or len(df) < _MIN_BARS:
-            continue
-
-        signals = compute_momentum_signals(df, params, market_df=market_df)
-        if signals.empty:
-            continue
-
-        last_entry = int(signals["entry"].iloc[-1])
-        if last_entry != 1:  # ロングのみ追跡（allow_short=False設定を想定）
-            continue
-
-        actual_signal_date = signals.index[-1].strftime("%Y-%m-%d")
-        if store.signal_exists(symbol, actual_signal_date, config_name):
-            continue
-
-        last_row = signals.iloc[-1]
-        last_close = float(df["close"].iloc[-1])
-        last_atr = float(last_row["atr"]) if not pd.isna(last_row["atr"]) else last_close * 0.02
-        stop = last_close - last_atr * params.atr_stop_mult
-        max_exit = (entry_date + timedelta(days=params.max_holding_days)).isoformat()
-
-        sig = ForwardSignal(
-            symbol=symbol,
-            signal_date=actual_signal_date,
-            side="long",
-            entry_date=entry_date.isoformat(),
-            entry_price=last_close,
-            stop_price=stop,
-            target_price=float("inf"),
-            max_exit_date=max_exit,
-            config_name=config_name,
-        )
-
-        if not dry:
-            store.insert_signal(sig)
-        new_signals.append(sig)
-
-    return new_signals
+    return out
 
 
 # ── 出口チェック ────────────────────────────────────────────────────────────────
@@ -411,9 +347,10 @@ def _check_exits(
     load_bars,
     cost_model: CostModel,
     today: date,
+    current_equity: float,
     dry: bool,
-) -> tuple[int, list[dict]]:
-    """オープンシグナルの出口条件を昨日の OHLC で判定してクローズする。"""
+) -> tuple[int, list[dict], float]:
+    """オープンシグナルの出口条件を昨日の OHLC で判定してクローズする（実現損益を評価額に反映）。"""
     closed = 0
     closed_records: list[dict] = []
     yesterday = (today - timedelta(days=1)).isoformat()
@@ -425,6 +362,7 @@ def _check_exits(
         stop_price = float(sig["stop_price"])
         target_price = float(sig["target_price"])
         max_exit_date = sig["max_exit_date"]
+        shares = int(sig["shares"] or 0)
 
         df = load_bars(symbol)
         if df.empty:
@@ -435,12 +373,11 @@ def _check_exits(
         if df_after.empty:
             continue
 
-        for i, (dt, row) in enumerate(df_after.iterrows()):
+        for dt, row in df_after.iterrows():
             dt_str = dt.strftime("%Y-%m-%d")
             if dt_str > yesterday:
                 break  # 本日以降はまだ確定していない
 
-            # 出口条件（longs のみ）
             exit_price: float | None = None
             exit_reason: str | None = None
 
@@ -458,67 +395,53 @@ def _check_exits(
                 gross = (exit_price - entry_price) / entry_price
                 holding = max(1, (dt - entry_ts).days)
                 cost_frac = cost_model.round_trip_cost_fraction(
-                    price=entry_price, shares=1,
-                    holding_days=holding, side="long",
+                    price=entry_price, shares=1, holding_days=holding, side="long",
                 )
                 net = gross - cost_frac
+                realized_yen = shares * entry_price * net
 
                 if not dry:
                     store.close_signal(
-                        sig["id"],
-                        exit_date=dt_str,
-                        exit_price=exit_price,
-                        exit_reason=exit_reason,
-                        gross_return=gross,
-                        net_return=net,
+                        sig["id"], exit_date=dt_str, exit_price=exit_price,
+                        exit_reason=exit_reason, gross_return=gross, net_return=net,
                     )
+                current_equity += realized_yen
                 logger.info(
-                    "  クローズ: %s(%s) → %s @ %.0f  net %+.2f%%",
-                    symbol, config_label(sig["config_name"]), exit_reason, exit_price, net * 100,
+                    "  クローズ: %s → %s @ %.0f  net %+.2f%%  実現損益 %+.0f円",
+                    symbol, exit_reason, exit_price, net * 100, realized_yen,
                 )
                 closed_records.append({**sig, "exit_reason": exit_reason, "net_return": net})
                 closed += 1
                 break
 
-    return closed, closed_records
+    return closed, closed_records, current_equity
 
 
 # ── レポート出力 ────────────────────────────────────────────────────────────────
 
-def config_label(name: str) -> str:
-    labels = {
-        "config_iii": "③rsi<30", "config_iv": "④rsi<35", "config_v": "⑤rsi<40",
-        "mom_lb20": "momentum(lb20)", "mom_lb40": "momentum(lb40)", "mom_lb60": "momentum(lb60)",
-    }
-    return labels.get(name, name)
-
-
 def _print_report(
-    all_new: dict[str, list[ForwardSignal]],
+    new_signals: list[ForwardSignal],
     store: SignalStore,
     signal_date: str,
     entry_date: date,
+    current_equity: float,
 ) -> None:
     print(f"\n{'=' * 60}")
-    print(f"  Phase 1 スキャン結果  シグナル日: {signal_date}  エントリー: {entry_date}")
+    print(f"  Phase 1 スキャン結果（{_CONFIG_NAME}）  シグナル日: {signal_date}  エントリー: {entry_date}")
     print(f"{'=' * 60}")
+    print(f"\n評価額: {current_equity:,.0f}円（開始 {_INITIAL_EQUITY:,.0f}円・騰落率 {(current_equity/_INITIAL_EQUITY-1)*100:+.1f}%）")
 
-    total_new = 0
-    for config_name, sigs in all_new.items():
-        label = config_label(config_name)
-        if sigs:
-            print(f"\n【{label}】新規シグナル {len(sigs)} 件:")
-            for s in sigs:
-                print(
-                    f"  {s.symbol:6s}  買い @ 本日始値(≈{s.entry_price:,.0f}円)  "
-                    f"目標 {s.target_price:,.0f}  ストップ {s.stop_price:,.0f}  "
-                    f"期限 {s.max_exit_date}"
-                )
-            total_new += len(sigs)
-        else:
-            print(f"\n【{label}】新規シグナルなし")
+    if new_signals:
+        print(f"\n新規シグナル {len(new_signals)} 件:")
+        for s in new_signals:
+            print(
+                f"  {s.symbol:6s}  買い {s.shares}株 @ 本日始値(≈{s.entry_price:,.0f}円)  "
+                f"ストップ {s.stop_price:,.0f}  期限 {s.max_exit_date}"
+            )
+    else:
+        print("\n新規シグナルなし")
 
-    print(f"\n── 累計 ({', '.join(config_label(k) for k in all_new)}) ──")
+    print("\n── 累計 ──")
     print(f"  {store.summary()}")
     print()
 

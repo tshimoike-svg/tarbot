@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS forward_signals (
     target_price  REAL NOT NULL,
     max_exit_date TEXT NOT NULL,
     config_name   TEXT NOT NULL,
+    shares        INTEGER,
     status        TEXT NOT NULL DEFAULT 'open',
     exit_date     TEXT,
     exit_price    REAL,
@@ -53,7 +54,8 @@ class ForwardSignal:
     stop_price: float         # entry_price - ATR × mult
     target_price: float       # T 時点の MA（利確目標）
     max_exit_date: str        # entry_date + max_holding_days YYYY-MM-DD
-    config_name: str          # "config_iii" / "config_iv" / "config_v"
+    config_name: str          # "config_iii" / "config_iv" / "config_v" / "combo_v_mom60"
+    shares: int | None = None  # 実際に建てた株数（複利計算・実現損益円換算に使う）
 
 
 class SignalStore:
@@ -82,12 +84,13 @@ class SignalStore:
         cur = self._conn.execute(
             """INSERT OR IGNORE INTO forward_signals
             (symbol, signal_date, side, entry_date, entry_price, stop_price,
-             target_price, max_exit_date, config_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             target_price, max_exit_date, config_name, shares)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 sig.symbol, sig.signal_date, sig.side, sig.entry_date,
                 float(sig.entry_price), float(sig.stop_price),
                 float(sig.target_price), sig.max_exit_date, sig.config_name,
+                sig.shares,
             ),
         )
         self._conn.commit()

@@ -298,10 +298,13 @@ DEFAULT_RISK = RiskParams()
 # （lot_cost > account_equity のみ拒否）に一本化し、ここでは口座資金そのものを
 # 上限とする（1.0＝実質的にsize_position_fixed_fractionの下限チェックに委譲）。
 # max_risk_per_trade はこのモデルでは risk_amount=None のため実質不使用。
+# max_daily_loss は既定3%だと、1銘柄48%配分×5銘柄構成では通常運転でも
+# 2銘柄同時損切り程度で超過してしまう（0.48*5%*2=4.8%）ため、この運用専用に
+# 15%へ引き上げた（2026-07-18・ユーザー決定。Phase0のDD基準と同じ数値）。
 COMBO_V_MOM60_RISK = RiskParams(
     max_risk_per_trade=DEFAULT_RISK.max_risk_per_trade,
     max_symbol_ratio=1.0,
-    max_daily_loss=DEFAULT_RISK.max_daily_loss,
+    max_daily_loss=0.15,
     max_trades_per_day=2,
     max_positions=5,
 )
