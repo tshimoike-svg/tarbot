@@ -566,9 +566,10 @@ with tab_open:
                            "entry_price", "stop_price", "target_price", "max_exit_date"]].copy()
                 d["ロット"]      = [r[0] for r in lots_data]
                 d["実投資額"]    = [int(r[1]) for r in lots_data]
-                d["目標利益(¥)"] = (
-                    d["ロット"] * _LOT_SIZE * (d["target_price"] - d["entry_price"])
-                ).round(0).astype(int)
+                # momentum系はtarget_price=inf（固定目標なし）のため、目標利益は計算不能（NaN）にする
+                has_target = ~d["target_price"].isin([float("inf"), float("-inf")])
+                profit_yen = d["ロット"] * _LOT_SIZE * (d["target_price"] - d["entry_price"])
+                d["目標利益(¥)"] = profit_yen.where(has_target).round(0)
                 d = d.rename(columns={
                     "symbol": "銘柄", "config_name": "設定", "signal_date": "シグナル日",
                     "entry_date": "エントリー日", "entry_price": "単価",
