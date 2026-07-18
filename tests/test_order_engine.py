@@ -112,9 +112,56 @@ def test_exit_uses_margin_close_cash_margin_code(monkeypatch: pytest.MonkeyPatch
     rm = _rm()
     engine = OrderEngine(client=client, risk_manager=rm)  # type: ignore[arg-type]
     # 決済はゲートを素通りするので、事前の建て有無に関わらずテストできる
-    engine.submit(_exit())
+    engine.submit(_exit(), hold_id="E20260718001")
 
     assert client.calls[0]["CashMargin"] == 3  # 信用返済
+
+
+# --- 決済には返済建玉ID（hold_id）が必須 ---------------------------------------------
+def test_exit_without_hold_id_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("execution.order_engine.DRY_RUN", False)
+    client = FakeKabuClient()
+    rm = _rm()
+    engine = OrderEngine(client=client, risk_manager=rm)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError):
+        engine.submit(_exit())
+
+    assert client.calls == []
+
+
+def test_exit_builds_close_positions_with_hold_id_and_qty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("execution.order_engine.DRY_RUN", False)
+    client = FakeKabuClient()
+    rm = _rm()
+    engine = OrderEngine(client=client, risk_manager=rm)  # type: ignore[arg-type]
+
+    engine.submit(_exit(shares=300), hold_id="E20260718009")
+
+    assert client.calls[0]["ClosePositions"] == [{"HoldID": "E20260718009", "Qty": 300}]
+
+
+# --- DelivType: 新規は0、返済は指定必須（お預り金=2） -------------------------------
+def test_entry_deliv_type_is_unspecified(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("execution.order_engine.DRY_RUN", False)
+    client = FakeKabuClient()
+    rm = _rm()
+    engine = OrderEngine(client=client, risk_manager=rm)  # type: ignore[arg-type]
+
+    engine.submit(_entry())
+
+    assert client.calls[0]["DelivType"] == 0
+
+
+def test_exit_deliv_type_is_okazukin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("execution.order_engine.DRY_RUN", False)
+    client = FakeKabuClient()
+    rm = _rm()
+    engine = OrderEngine(client=client, risk_manager=rm)  # type: ignore[arg-type]
+
+    engine.submit(_exit(), hold_id="E20260718001")
+
+    assert client.calls[0]["DelivType"] == 2
 
 
 # --- 一般信用（無期限）に統一されていること -----------------------------------------
@@ -126,7 +173,7 @@ def test_uses_general_unlimited_margin_trade_type(monkeypatch: pytest.MonkeyPatc
 
     engine.submit(_entry())
 
-    assert client.calls[0]["MarginTradeType"] == 3
+    assert client.calls[0]["MarginTradeType"] == 2  # 一般信用（長期＝無期限）
 
 
 # --- 売り方向のサイドコード ---------------------------------------------------------
@@ -136,6 +183,29 @@ def test_sell_side_code(monkeypatch: pytest.MonkeyPatch) -> None:
     rm = _rm()
     engine = OrderEngine(client=client, risk_manager=rm)  # type: ignore[arg-type]
 
-    engine.submit(_exit(side="sell"))
+    engine.submit(_exit(side="sell"), hold_id="E20260718001")
 
     assert client.calls[0]["Side"] == "1"
+
+
+# --- 口座区分（既定は一般口座） ------------------------------------------------------
+def test_default_account_type_is_ippan(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("execution.order_engine.DRY_RUN", False)
+    client = FakeKabuClient()
+    rm = _rm()
+    engine = OrderEngine(client=client, risk_manager=rm)  # type: ignore[arg-type]
+
+    engine.submit(_entry())
+
+    assert client.calls[0]["AccountType"] == 2  # 一般口座
+
+
+def test_account_type_is_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("execution.order_engine.DRY_RUN", False)
+    client = FakeKabuClient()
+    rm = _rm()
+    engine = OrderEngine(client=client, risk_manager=rm, account_type=4)  # type: ignore[arg-type]
+
+    engine.submit(_entry())
+
+    assert client.calls[0]["AccountType"] == 4

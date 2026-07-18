@@ -134,6 +134,33 @@ def test_retry_exhausted_raises_api_error() -> None:
     assert ei.value.status_code == 503
 
 
+# --- 残高照会（get_positions） ------------------------------------------------------
+def test_get_positions_returns_list() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(200, {"ResultCode": 0, "Token": "TOK123"}),
+            FakeResponse(200, [{"ExecutionID": "E1", "Symbol": "1301"}]),  # type: ignore[list-item]
+        ]
+    )
+    positions = _client(session).get_positions()
+    assert positions == [{"ExecutionID": "E1", "Symbol": "1301"}]
+    assert session.calls[1]["url"].endswith("/positions")
+
+
+def test_get_positions_builds_query_string() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(200, {"ResultCode": 0, "Token": "TOK123"}),
+            FakeResponse(200, []),
+        ]
+    )
+    _client(session).get_positions(symbol="1301", product="2", side="2")
+    url = session.calls[1]["url"]
+    assert "symbol=1301" in url
+    assert "product=2" in url
+    assert "side=2" in url
+
+
 # --- 発注（send_order） ------------------------------------------------------------
 def test_send_order_merges_order_password_and_posts(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KABU_ORDER_PASSWORD_DEMO", "ORDER_PW")

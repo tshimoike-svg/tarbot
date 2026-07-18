@@ -30,6 +30,7 @@ import os
 import time
 from collections.abc import Callable
 from typing import Any, Literal
+from urllib.parse import urlencode
 
 import requests
 from dotenv import load_dotenv
@@ -137,7 +138,7 @@ class KabuClient:
         *,
         json_body: dict[str, Any] | None = None,
         auth: bool = True,
-    ) -> dict[str, Any]:
+    ) -> Any:
         url = f"{self._base_url}{path}"
         headers = {"Content-Type": "application/json"}
         if auth:
@@ -197,6 +198,27 @@ class KabuClient:
     def get_wallet_cash(self) -> dict[str, Any]:
         """現物買付可能額（GET /wallet/cash）。"""
         return self._http("GET", "/wallet/cash")
+
+    def get_positions(
+        self,
+        *,
+        symbol: str | None = None,
+        product: str | None = None,
+        side: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """保有建玉一覧（GET /positions）。信用返済の ClosePositions に使う建玉ID
+        （レスポンスの ExecutionID）を調べるのに使う。
+
+        Args:
+            symbol: 銘柄コードで絞り込み（省略可）。
+            product: "0"=すべて/"1"=現物/"2"=信用/"3"=先物/"4"=OP（省略可）。
+            side: "1"=売/"2"=買で絞り込み（省略可）。
+        """
+        params = {"symbol": symbol, "product": product, "side": side}
+        query = urlencode({k: v for k, v in params.items() if v is not None})
+        path = f"/positions?{query}" if query else "/positions"
+        result = self._http("GET", path)
+        return result if isinstance(result, list) else []
 
     def get_wallet_margin(self) -> dict[str, Any]:
         """信用建余力（GET /wallet/margin）。"""
