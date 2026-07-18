@@ -20,7 +20,7 @@ from typing import Literal
 
 from config.settings import RiskParams
 
-__all__ = ["SizingResult", "size_position"]
+__all__ = ["SizingResult", "size_position", "size_position_fixed_fraction"]
 
 Binding = Literal["risk", "exposure", "untradable"]
 
@@ -83,3 +83,62 @@ def size_position(
     notional = shares * entry_price
     risk_amount = shares * stop_distance if stop_distance > 0 else None
     return SizingResult(shares=shares, notional=notional, risk_amount=risk_amount, binding=binding)
+
+
+def size_position_fixed_fraction(
+    *,
+    account_equity: float,
+    entry_price: float,
+    leverage: float,
+    usage_rate: float,
+    per_symbol_share: float,
+    unit: int = 100,
+) -> SizingResult:
+    """レバレッジ×使用率×銘柄配分で決まる固定予算に単元量子化するサイジング（2026-07-18決定）。
+
+    `size_position` とは別系統（ストップ幅を使わない・レバレッジ運用の固定予算モデル）。
+    config_v + mom_lb60_filtered の組み合わせ運用で採用したルール：
+
+    - 1銘柄の予算 = account_equity × leverage × usage_rate × per_symbol_share
+      （例：資金100万円・3倍レバレッジ・使用率80%・配分20% → 予算48万円）
+    - 予算内に収まる単元数を買う（端数切り捨て）
+    - **1単元の必要額が予算を超える場合でも、最低1単元は買う**（`size_position` と異なり
+      shares=0 にはならない。資金が全く足りない＝lot_cost > account_equity のときのみ 0）
+
+    Args:
+        leverage: 信用倍率（例 3.0）。
+        usage_rate: 証拠金使用率（例 0.8 = 80%）。
+        per_symbol_share: レバレッジ込み総予算のうち1銘柄への配分比率（例 0.20）。
+        unit: 単元株数（既定100）。
+
+    Returns:
+        SizingResult。binding は "exposure"（量子化ありの固定予算）固定。
+        risk_amount は常に None（ストップ幅を使わないサイジングのため）。
+    """
+    if account_equity <= 0:
+        raise ValueError("account_equity は正")
+    if entry_price <= 0:
+        raise ValueError("entry_price は正")
+    if leverage <= 0:
+        raise ValueError("leverage は正")
+    if not 0.0 < usage_rate <= 1.0:
+        raise ValueError("usage_rate は (0, 1]")
+    if not 0.0 < per_symbol_share <= 1.0:
+        raise ValueError("per_symbol_share は (0, 1]")
+    if unit < 1:
+        raise ValueError("unit は 1 以上")
+
+    budget = account_equity * leverage * usage_rate * per_symbol_share
+    lot_cost = entry_price * unit
+
+    if lot_cost > account_equity:
+        return SizingResult(shares=0, notional=0.0, risk_amount=None, binding="untradable")
+
+    if lot_cost >= budget:
+        shares = unit
+    else:
+        shares = int(budget // lot_cost) * unit
+
+    return SizingResult(
+        shares=shares, notional=shares * entry_price, risk_amount=None, binding="exposure",
+    )

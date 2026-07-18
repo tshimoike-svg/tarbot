@@ -25,6 +25,7 @@ __all__ = [
     "DEFAULT_CROSS_SECTION",
     "RiskParams",
     "DEFAULT_RISK",
+    "COMBO_V_MOM60_RISK",
 ]
 
 
@@ -287,3 +288,20 @@ class RiskParams:
 
 # 既定のリスク設定（初期案。実運用前に必ず自分で検証・調整すること）。
 DEFAULT_RISK = RiskParams()
+
+# config_v + mom_lb60_filtered 併用運用の確定リスク設定（2026-07-18決定）。
+# 信用3倍・証拠金使用率80%・1銘柄配分20%（目標配分は48% = 3.0*0.8*0.20）。
+# position_sizer.size_position_fixed_fraction 側で「1単元が48%目標を超えても最低
+# 1単元は買う」を実装しているため、max_symbol_ratio をちょうど0.48にすると
+# その例外ケースをrisk_managerが必ず却下してしまい、意図が死ぬ（1単元必要額が
+# 目標よりわずかでも高いと通らない）。集中度の実質的な制御はサイジング関数側
+# （lot_cost > account_equity のみ拒否）に一本化し、ここでは口座資金そのものを
+# 上限とする（1.0＝実質的にsize_position_fixed_fractionの下限チェックに委譲）。
+# max_risk_per_trade はこのモデルでは risk_amount=None のため実質不使用。
+COMBO_V_MOM60_RISK = RiskParams(
+    max_risk_per_trade=DEFAULT_RISK.max_risk_per_trade,
+    max_symbol_ratio=1.0,
+    max_daily_loss=DEFAULT_RISK.max_daily_loss,
+    max_trades_per_day=2,
+    max_positions=5,
+)
