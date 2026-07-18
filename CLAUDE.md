@@ -91,8 +91,8 @@ strategy/    指標・シグナル生成・リスク管理
   risk_manager.py    ← 全発注が通る関門
   event_reaction.py  ← 【トラックB・未】TDnetイベント反応（ドライラン専用）
 execution/   fill_monitor.py（約定率/滑り実測）・dry_run.py（イベント駆動）・
-             kabu_client.py（kabuステーションAPI認証・残高/板情報の読み取り専用）・
-             order_engine.py(未・発注はrisk_manager経由必須)
+             kabu_client.py（kabuステーションAPI認証・残高/板情報・発注のHTTPラッパー）・
+             order_engine.py（risk_manager経由の発注エンジン。一般信用・寄成行固定）
 backtest/    cost_model.py・evaluator.py・runner.py(未)
 notification/ LINE Messaging API・メール通知（未）
 dashboard/   Streamlit + Plotly（未）

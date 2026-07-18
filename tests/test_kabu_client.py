@@ -134,6 +134,34 @@ def test_retry_exhausted_raises_api_error() -> None:
     assert ei.value.status_code == 503
 
 
+# --- 発注（send_order） ------------------------------------------------------------
+def test_send_order_merges_order_password_and_posts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KABU_ORDER_PASSWORD_DEMO", "ORDER_PW")
+    session = FakeSession(
+        [
+            FakeResponse(200, {"ResultCode": 0, "Token": "TOK123"}),
+            FakeResponse(200, {"OrderId": "ABC"}),
+        ]
+    )
+    client = KabuClient(
+        api_password="PW", session=session, retry_backoff=0.0,  # type: ignore[arg-type]
+        sleep=lambda _s: None, load_env=False,
+    )
+    result = client.send_order({"Symbol": "1301", "Qty": 100})
+    assert result == {"OrderId": "ABC"}
+
+    call = session.calls[1]
+    assert call["url"].endswith("/sendorder")
+    assert call["json"] == {"Symbol": "1301", "Qty": 100, "Password": "ORDER_PW"}
+    assert call["headers"]["X-API-KEY"] == "TOK123"
+
+
+def test_send_order_missing_order_password_raises() -> None:
+    client = _client(FakeSession([]))
+    with pytest.raises(KabuAuthError):
+        client.send_order({"Symbol": "1301"})
+
+
 def test_connection_error_raises_kabu_error() -> None:
     class RaisingSession:
         def request(self, *_a: Any, **_kw: Any) -> Any:
