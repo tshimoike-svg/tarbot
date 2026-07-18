@@ -23,10 +23,19 @@ _DB              = Path(__file__).parent.parent / "data/db/forward_signals.sqlit
 _BT_CSV          = Path(__file__).parent.parent / "data/db/bt_trades.csv"
 _INITIAL_CAPITAL = 1_000_000
 
-# ── ドライラン固定パラメータ ─────────────────────────────────────────────────────
+# ── ドライラン固定パラメータ（バックテストモードのスライダー用） ───────────────────────
 _LOT_SIZE        = 100        # 単元株（TSE標準）
 _PER_POS_TARGET  = 500_000    # 1銘柄の買付目安（¥500K）
 _LEVERAGE_LIMIT  = 2.5        # 買付総額 / 資本 の上限
+
+# ── ドライラン実績（combo_v_mom60）のサイジングパラメータ ───────────────────────────
+# 2026-07-18決定。実際の株数は forward_signals.sqlite の shares 列に保存済みなので
+# ここでは表示用の説明文・予算枠の再計算にのみ使う（サイジング自体は再現しない）。
+_LIVE_LEVERAGE          = 3.0
+_LIVE_USAGE_RATE        = 0.8
+_LIVE_PER_SYMBOL_SHARE  = 0.20
+_LIVE_MAX_NEW_PER_DAY   = 2
+_LIVE_START_DATE        = "2026-06-01"
 
 st.set_page_config(page_title="Phase 1 監視", page_icon="📈", layout="wide")
 
@@ -110,6 +119,22 @@ def _equity_from_lots(closed_df: pd.DataFrame, initial: float = _INITIAL_CAPITAL
     result = []
     for _, row in closed_df.sort_values("exit_date").iterrows():
         _, investment = _calc_lots(float(row["entry_price"]))
+        equity += investment * float(row["net_return"])
+        result.append(equity)
+    return np.array(result)
+
+
+def _equity_from_shares(closed_df: pd.DataFrame, initial: float = _INITIAL_CAPITAL) -> np.ndarray:
+    """実際に約定した shares 列（risk_manager・portfolio_allocatorが決めた実サイズ）を
+    使って複利でエクイティを計算する（combo_v_mom60のドライラン実績用）。
+    """
+    if closed_df.empty:
+        return np.array([initial])
+    equity = initial
+    result = []
+    for _, row in closed_df.sort_values("exit_date").iterrows():
+        shares = float(row.get("shares") or 0)
+        investment = shares * float(row["entry_price"])
         equity += investment * float(row["net_return"])
         result.append(equity)
     return np.array(result)
@@ -332,14 +357,12 @@ if is_bt:
     open_       = _df[_df["status"] == "open"].copy()
     skipped_open = pd.DataFrame()
 else:
-    # 同銘柄・同日の複数コンフィグを1建玉に集約 → 時系列で買付枠制約を適用
-    all_dedup = _dedup_by_stock(_df)
-    all_dedup = _simulate_fills(all_dedup, _INITIAL_CAPITAL * _LEVERAGE_LIMIT)
-    filled    = all_dedup[all_dedup["filled"]]
-    closed    = filled[filled["status"] == "closed"].sort_values("exit_date").copy()
-    open_     = filled[filled["status"] == "open"].copy()
-    # 買付枠オーバーで見送った、現在オープン相当の建玉
-    skipped_open = all_dedup[(~all_dedup["filled"]) & (all_dedup["status"] == "open")].copy()
+    # combo_v_mom60 は daily_scan.py が risk_manager・portfolio_allocator を通して
+    # 承認した建玉だけを記録しているため、DBにある行は全て実際に約定済み
+    # （見送り分はそもそも記録されない）。再シミュレーションは行わない。
+    closed = _df[_df["status"] == "closed"].sort_values("exit_date").copy()
+    open_ = _df[_df["status"] == "open"].copy()
+    skipped_open = pd.DataFrame()
 
 # ── 複利計算 ────────────────────────────────────────────────────────────────────
 
@@ -351,7 +374,7 @@ if not closed.empty:
         eq_lev,   _        = _portfolio_simulation(closed, position_ratio, leverage, max_pos)
         eq_ref20, _        = _portfolio_simulation(closed, 0.20, 1.0, 5)
     else:
-        eq_base  = _equity_from_lots(closed)
+        eq_base  = _equity_from_shares(closed)
         eq_lev   = eq_base
         eq_ref20 = eq_base
         bt_dates = None
@@ -387,9 +410,9 @@ else:
 sign = "+" if gain >= 0 else ""
 
 if not is_bt:
-    # ドライランモード: 実ロット基準の評価額 + 露出状況
-    open_exposure = sum(_calc_lots(float(r["entry_price"]))[1] for _, r in open_.iterrows())
-    cap_limit     = _INITIAL_CAPITAL * _LEVERAGE_LIMIT
+    # ドライランモード（combo_v_mom60）: 実際の shares 列を使った評価額 + 露出状況
+    open_exposure = sum(float(r.get("shares") or 0) * float(r["entry_price"]) for _, r in open_.iterrows())
+    cap_limit     = cur_equity * _LIVE_LEVERAGE * _LIVE_USAGE_RATE  # 現在の評価額に対する予算（複利）
     exp_used_pct  = open_exposure / cap_limit * 100 if cap_limit > 0 else 0.0
 
     st.markdown(
@@ -397,7 +420,7 @@ if not is_bt:
         <div style="background:#1e1e2e;border-radius:16px;padding:32px 40px;
                     margin:8px 0 20px;text-align:center">
           <div style="color:#aaa;font-size:14px;margin-bottom:8px">
-            実現評価額（ドライラン・ロット基準）
+            実現評価額（ドライラン・config_v + mom_lb60_filtered併用）
           </div>
           <div style="color:#fff;font-size:60px;font-weight:700;letter-spacing:-2px;line-height:1.1">
             ¥{cur_equity:,.0f}
@@ -414,8 +437,10 @@ if not is_bt:
         unsafe_allow_html=True,
     )
     st.caption(
-        f"1銘柄: 1ロット≥¥{_PER_POS_TARGET:,.0f}→1ロット / 未満→¥{_PER_POS_TARGET:,.0f}以内で最大ロット　"
-        f"買付上限: 資本×{_LEVERAGE_LIMIT}倍（¥{cap_limit:,.0f}）　単元 {_LOT_SIZE}株"
+        f"{_LIVE_START_DATE} に ¥{_INITIAL_CAPITAL:,.0f} でスタート（複利）。"
+        f"信用{_LIVE_LEVERAGE:.0f}倍・証拠金使用率{_LIVE_USAGE_RATE*100:.0f}%・"
+        f"1銘柄配分{_LIVE_PER_SYMBOL_SHARE*100:.0f}%（単元未満切り捨て・1単元が配分超過でも最低1単元）　"
+        f"1日の新規建て上限{_LIVE_MAX_NEW_PER_DAY}件・競合時は1単元必要額が安い方優先"
     )
 else:
     # バックテストモード: 従来の比較カード
@@ -553,22 +578,23 @@ with tab_open:
                 use_container_width=True, hide_index=True,
             )
     else:
-        cap_limit = _INITIAL_CAPITAL * _LEVERAGE_LIMIT
+        cap_limit = cur_equity * _LIVE_LEVERAGE * _LIVE_USAGE_RATE
         if open_.empty and skipped_open.empty:
             st.info("現在オープンポジションはありません。")
         else:
             if not open_.empty:
-                lots_data = [_calc_lots(float(r["entry_price"])) for _, r in open_.iterrows()]
-                total_exp = sum(r[1] for r in lots_data)
+                shares_col = open_["shares"].fillna(0).astype(float)
+                investment = shares_col * open_["entry_price"].astype(float)
+                total_exp = float(investment.sum())
                 remaining = cap_limit - total_exp
 
                 d = open_[["symbol", "config_name", "signal_date", "entry_date",
                            "entry_price", "stop_price", "target_price", "max_exit_date"]].copy()
-                d["ロット"]      = [r[0] for r in lots_data]
-                d["実投資額"]    = [int(r[1]) for r in lots_data]
+                d["株数"]        = shares_col.astype(int).to_numpy()
+                d["実投資額"]    = investment.round(0).astype(int).to_numpy()
                 # momentum系はtarget_price=inf（固定目標なし）のため、目標利益は計算不能（NaN）にする
                 has_target = ~d["target_price"].isin([float("inf"), float("-inf")])
-                profit_yen = d["ロット"] * _LOT_SIZE * (d["target_price"] - d["entry_price"])
+                profit_yen = d["株数"] * (d["target_price"] - d["entry_price"])
                 d["目標利益(¥)"] = profit_yen.where(has_target).round(0)
                 d = d.rename(columns={
                     "symbol": "銘柄", "config_name": "設定", "signal_date": "シグナル日",
@@ -577,15 +603,15 @@ with tab_open:
                 })
                 st.caption(
                     f"買付総額: ¥{total_exp:,.0f}　残枠: ¥{remaining:,.0f}　"
-                    f"（上限 ¥{cap_limit:,.0f} = 資本×{_LEVERAGE_LIMIT}倍）"
+                    f"（上限 ¥{cap_limit:,.0f} = 評価額×{_LIVE_LEVERAGE:.0f}倍×使用率{_LIVE_USAGE_RATE*100:.0f}%）"
                 )
                 st.dataframe(
                     d[["銘柄", "設定", "シグナル日", "エントリー日", "単価", "ストップ", "目標", "期限",
-                       "ロット", "実投資額", "目標利益(¥)"]],
+                       "株数", "実投資額", "目標利益(¥)"]],
                     use_container_width=True, hide_index=True,
                 )
             else:
-                st.info("枠内で約定したオープンポジションはありません。")
+                st.info("オープンポジションはありません。")
 
             if not skipped_open.empty:
                 st.warning(
@@ -609,14 +635,13 @@ with tab_closed:
         st.info("クローズしたトレードはまだありません。")
     elif not is_bt:
         d = closed[["symbol", "config_name", "signal_date", "exit_date",
-                    "entry_price", "exit_price", "exit_reason",
+                    "entry_price", "exit_price", "exit_reason", "shares",
                     "gross_return", "net_return"]].copy()
-        lots_data     = [_calc_lots(float(p)) for p in d["entry_price"]]
-        d["ロット"]   = [r[0] for r in lots_data]
-        d["実投資額"] = [int(r[1]) for r in lots_data]
-        d["実損益(¥)"] = (
-            d["ロット"] * _LOT_SIZE * (d["exit_price"] - d["entry_price"])
-        ).round(0).astype(int)
+        shares_col = d["shares"].fillna(0).astype(float)
+        d["株数"]   = shares_col.astype(int)
+        d["実投資額"] = (shares_col * d["entry_price"]).round(0).astype(int)
+        # 実損益はコスト控除後（net_return）で計算する（グロスの値幅ではない）
+        d["実損益(¥)"] = (d["実投資額"] * d["net_return"]).round(0).astype(int)
         d["gross_return"] = (d["gross_return"] * 100).round(2)
         d["net_return"]   = (d["net_return"]   * 100).round(2)
         d["exit_reason"]  = d["exit_reason"].map(
@@ -633,7 +658,7 @@ with tab_closed:
 
         st.dataframe(
             d[["銘柄", "設定", "シグナル日", "クローズ日", "単価", "出口", "理由",
-               "グロス%", "ネット%", "ロット", "実投資額", "実損益(¥)"]].style.map(
+               "グロス%", "ネット%", "株数", "実投資額", "実損益(¥)"]].style.map(
                 _clr, subset=["ネット%", "実損益(¥)"]
             ),
             use_container_width=True, hide_index=True,
@@ -680,7 +705,7 @@ with tab_chart:
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=x_axis, y=eq_base.tolist(), mode="lines",
-            name="ロット基準" if not is_bt else "基準（20%×1.0x×5銘柄）",
+            name="combo_v_mom60（実績）" if not is_bt else "基準（20%×1.0x×5銘柄）",
             line=dict(color="#378add", width=2),
         ))
 

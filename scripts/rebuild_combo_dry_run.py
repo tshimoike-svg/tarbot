@@ -120,7 +120,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="config_v + mom_lb60_filtered 併用ドライラン再構築")
     parser.add_argument("--dry", action="store_true", help="DBを書き換えず件数・最終評価額だけ表示する")
     parser.add_argument("--db", default=str(_ROOT / "data/db/forward_signals.sqlite"))
+    parser.add_argument(
+        "--start-date", default="2026-06-01",
+        help="ドライラン開始日（この日から¥1,000,000スタートとして再生する。"
+             "指標のwarmupには開始日より前のデータも使う）",
+    )
     args = parser.parse_args(argv)
+    start_ts = pd.Timestamp(args.start_date)
 
     cache_files = sorted(_CACHE_DIR.glob("*.pkl"))
     symbols = sorted({p.stem.split("_")[0] for p in cache_files})
@@ -146,7 +152,13 @@ def main(argv: list[str] | None = None) -> int:
     us_df = load_spx("2024-01-01", (end_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d"), cache_dir=str(_ROOT / "data/db/us_spx_cache"))
 
     tagged = _collect_tagged_trades(dfs, market_df, us_df)
+    n_before_filter = len(tagged)
+    tagged = [(s, t, p) for s, t, p in tagged if t.entry_time >= start_ts]
     tagged.sort(key=lambda st: st[1].entry_time)
+    logger.info(
+        "開始日 %s 以降のトレードに絞り込み: %d 件 → %d 件（指標のwarmupには開始日より前のデータも使用済み）",
+        start_ts.date(), n_before_filter, len(tagged),
+    )
 
     cost_model = CostModel(get_cost_params("mid"))
     rm = RiskManager(account_equity=_INITIAL_EQUITY, params=COMBO_V_MOM60_RISK)
