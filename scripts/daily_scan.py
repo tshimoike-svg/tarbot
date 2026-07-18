@@ -40,13 +40,14 @@ load_dotenv(_ROOT / ".env")
 
 from backtest.cost_model import CostModel
 from config.costs import get_cost_params
-from config.settings import SwingReversionParams
+from config.settings import SwingMomentumParams, SwingReversionParams
 from config.symbols import SYMBOLS
 from data.daily_loader import build_daily_loader
 from data.yahoo_loader import build_yahoo_loader
 from data.signal_store import ForwardSignal, SignalStore
 from data.us_loader import load_spx_fresh
 from notification.push_notifier import send_close_alert, send_signal_alert
+from strategy.swing_momentum import compute_signals as compute_momentum_signals
 from strategy.swing_reversion import compute_signals
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,24 @@ PHASE1_CONFIGS: dict[str, SwingReversionParams] = {
     "config_iii": SwingReversionParams(**_BASE, rsi_entry_max=30.0),
     "config_iv":  SwingReversionParams(**_BASE, rsi_entry_max=35.0),  # 推奨
     "config_v":   SwingReversionParams(**_BASE, rsi_entry_max=40.0),
+}
+
+# momentum（ブレイクアウト・ロングのみ）。docs/results/oos_eval_2026-06-25.md の
+# 追加検証（scripts/simulate_momentum.py）と同一パラメータ。反転がOOSで劣化する一方、
+# momentumは改善傾向だったため、フォワード母数を増やす目的で追跡対象に加える。
+MOMENTUM_CONFIGS: dict[str, SwingMomentumParams] = {
+    "mom_lb20": SwingMomentumParams(
+        breakout_lookback=20, atr_stop_mult=2.0, max_holding_days=10,
+        allow_long=True, allow_short=False,
+    ),
+    "mom_lb40": SwingMomentumParams(
+        breakout_lookback=40, atr_stop_mult=2.0, max_holding_days=10,
+        allow_long=True, allow_short=False,
+    ),
+    "mom_lb60": SwingMomentumParams(
+        breakout_lookback=60, atr_stop_mult=2.0, max_holding_days=10,
+        allow_long=True, allow_short=False,
+    ),
 }
 
 # シグナル計算に十分な日数（lookback + ATR + RSI + 余裕）
@@ -87,6 +106,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--all-configs", action="store_true",
         help="③④⑤ 全設定を同時追跡",
+    )
+    parser.add_argument(
+        "--include-momentum", action="store_true",
+        help="momentum（mom_lb20/40/60・ロングのみ）もフォワード追跡に含める",
     )
     parser.add_argument(
         "--db", default=str(_ROOT / "data/db/forward_signals.sqlite"),
@@ -177,6 +200,14 @@ def main(argv: list[str] | None = None) -> int:
                 signal_date, today, config_name, args.dry,
             )
             all_new[config_name] = new_sigs
+
+        if args.include_momentum:
+            for config_name, mom_params in MOMENTUM_CONFIGS.items():
+                new_mom_sigs = _detect_new_momentum_signals(
+                    all_symbols, mom_params, load_bars, store,
+                    signal_date, today, config_name, args.dry,
+                )
+                all_new[config_name] = new_mom_sigs
 
         # 6. LINE 通知（dry モードはスキップ）
         if not args.dry:
@@ -283,6 +314,66 @@ def _detect_new_signals(
     return new_signals
 
 
+def _detect_new_momentum_signals(
+    symbols: list[str],
+    params: SwingMomentumParams,
+    load_bars,
+    store: SignalStore,
+    signal_date: str,
+    entry_date: date,
+    config_name: str,
+    dry: bool,
+) -> list[ForwardSignal]:
+    """全銘柄をスキャンし、signal_date にブレイクアウトが出た銘柄を返す（ロングのみ）。
+
+    momentumには固定目標がない（ATR損切り／タイムストップのみで出る）ため、
+    target_price は +inf にする。_check_exits の target 到達判定
+    （row["close"] >= target_price）が実質無効化され、stop/time_stop だけが働く。
+    """
+    new_signals: list[ForwardSignal] = []
+
+    for symbol in symbols:
+        df = load_bars(symbol)
+        if df.empty or len(df) < _MIN_BARS:
+            continue
+
+        signals = compute_momentum_signals(df, params)
+        if signals.empty:
+            continue
+
+        last_entry = int(signals["entry"].iloc[-1])
+        if last_entry != 1:  # ロングのみ追跡（allow_short=False設定を想定）
+            continue
+
+        actual_signal_date = signals.index[-1].strftime("%Y-%m-%d")
+        if store.signal_exists(symbol, actual_signal_date, config_name):
+            continue
+
+        last_row = signals.iloc[-1]
+        last_close = float(df["close"].iloc[-1])
+        last_atr = float(last_row["atr"]) if not pd.isna(last_row["atr"]) else last_close * 0.02
+        stop = last_close - last_atr * params.atr_stop_mult
+        max_exit = (entry_date + timedelta(days=params.max_holding_days)).isoformat()
+
+        sig = ForwardSignal(
+            symbol=symbol,
+            signal_date=actual_signal_date,
+            side="long",
+            entry_date=entry_date.isoformat(),
+            entry_price=last_close,
+            stop_price=stop,
+            target_price=float("inf"),
+            max_exit_date=max_exit,
+            config_name=config_name,
+        )
+
+        if not dry:
+            store.insert_signal(sig)
+        new_signals.append(sig)
+
+    return new_signals
+
+
 # ── 出口チェック ────────────────────────────────────────────────────────────────
 
 def _check_exits(
@@ -366,7 +457,10 @@ def _check_exits(
 # ── レポート出力 ────────────────────────────────────────────────────────────────
 
 def config_label(name: str) -> str:
-    labels = {"config_iii": "③rsi<30", "config_iv": "④rsi<35", "config_v": "⑤rsi<40"}
+    labels = {
+        "config_iii": "③rsi<30", "config_iv": "④rsi<35", "config_v": "⑤rsi<40",
+        "mom_lb20": "momentum(lb20)", "mom_lb40": "momentum(lb40)", "mom_lb60": "momentum(lb60)",
+    }
     return labels.get(name, name)
 
 

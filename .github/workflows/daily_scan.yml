@@ -68,7 +68,7 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: uv run python scripts/daily_scan.py --all-configs
+        run: uv run python scripts/daily_scan.py --all-configs --include-momentum
 
       - name: forward_signals.sqlite をコミット
         run: |
